@@ -9,8 +9,9 @@ PICO_ROOT="${PICO_ROOT:-$HOME/pico}"
 SDK_PATH="${PICO_SDK_PATH:-$HOME/pico/pico-sdk}"
 CONF_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/piconew/last.conf"
 
-# 默认方案：Pico 2 / C++ / USB 串口 / 不选功能库 / 空模板
+# 默认方案：Pico 2 / ARM / C++ / USB 串口 / 不选功能库 / 空模板
 DEF_BOARD="pico2"
+DEF_ARCH="arm"
 DEF_LANG="cpp"
 DEF_STDIO="usb"
 DEF_LIBS=""
@@ -18,6 +19,7 @@ DEF_STARTER="empty"
 
 NAME=""
 BOARD=""
+ARCH=""
 LANG_SEL=""
 STDIO_SEL=""
 LIBS_SEL=""
@@ -30,6 +32,7 @@ SCHEME_CHOSEN=0
 die() { printf '\033[31m错误：%s\033[0m\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m%s\033[0m\n' "$*"; }
 ok() { printf '\033[32m%s\033[0m\n' "$*"; }
+warn() { printf '\033[33m%s\033[0m\n' "$*"; }
 
 # 项目内 build.sh 的唯一来源：既写入新工程，也能用 --print-build-sh 打印出来
 emit_build_sh() {
@@ -277,20 +280,22 @@ piconew — 快速创建 Pico SDK 工程
   piconew                        交互式创建
   piconew 工程名                  指定名字，其余交互
   piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink
-  piconew 工程名 --default        五项全部使用默认方案，不提问
+  piconew 工程名 --board pico2 --arch riscv --lang cpp
+  piconew 工程名 --default        六项全部使用默认方案，不提问
 
 交互流程第一步可选「创建方案」：
   上次的方案    复用上一次成功创建的选项（记在 ~/.config/piconew/last.conf）
-  默认方案      Pico 2 / C++ / USB 串口 / 不选功能库 / 空模板
-  逐项选择      依次问开发板、语言、串口、功能库、起始代码
+  默认方案      Pico 2 / ARM / C++ / USB 串口 / 不选功能库 / 空模板
+  逐项选择      依次问开发板、内核架构、语言、串口、功能库、起始代码
 
 选项：
   --board    pico2 | pico2_w | pico | pico_w      开发板
+  --arch     arm | riscv                          内核架构（仅 RP2350 板可用 riscv）
   --lang     c | cpp                              源文件语言
   --stdio    usb | uart | both | none             串口输出方式
   --libs     i2c,spi,pwm,adc,uart,multicore,float,pio   功能库（逗号分隔）
   --starter  blink | serial | pio | empty         起始代码
-  --default  五项全部使用默认方案（Pico 2 / C++ / USB / 无库 / 空模板）
+  --default  六项全部使用默认方案（Pico 2 / ARM / C++ / USB / 无库 / 空模板）
              仅用于完全不指定选项的场合，不能与上面的选项参数同时使用
   --print-build-sh   只把 build.sh 内容打印到 stdout（给已有工程升级用）
   -h, --help 显示本帮助
@@ -306,6 +311,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --board)   BOARD="${2:-}"; HAS_OPT=1; shift 2 ;;
+    --arch)    ARCH="${2:-}"; HAS_OPT=1; shift 2 ;;
     --lang)    LANG_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
     --stdio)   STDIO_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
     --libs)    LIBS_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
@@ -319,10 +325,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# --default 表示五项全部采用默认方案，与逐项指定互斥
+# --default 表示六项全部采用默认方案，与逐项指定互斥
 if [[ $ASSUME_DEFAULT -eq 1 && $HAS_OPT -eq 1 ]]; then
-  die "--default 与 --board/--lang/--stdio/--libs/--starter 不能同时使用
---default 要求五项全部使用默认方案；若要指定其中若干项，直接给出这些参数即可，
+  die "--default 与 --board/--arch/--lang/--stdio/--libs/--starter 不能同时使用
+--default 要求六项全部使用默认方案；若要指定其中若干项，直接给出这些参数即可，
 未给出的项会逐一询问。"
 fi
 
@@ -344,6 +350,20 @@ check_dir_free() {
 
 # 名字是从命令行给的，这里就先查一遍
 [[ -n "$NAME" ]] && check_dir_free "$NAME"
+
+# 板子和架构都从命令行给了就先对一遍，别等问完剩下的问题才报错
+if [[ -n "$BOARD" && -n "$ARCH" ]]; then
+  case "$BOARD" in
+    pico2|pico2_w) ;;
+    pico|pico_w)
+      [[ "$ARCH" == "arm" ]] || die "$BOARD 是 RP2040，只有 ARM 内核，不支持 --arch riscv"
+      ;;
+  esac
+  case "$ARCH" in
+    arm|riscv) ;;
+    *) die "--arch 只能是 arm 或 riscv" ;;
+  esac
+fi
 
 # ---------------- 选择菜单 ----------------
 CHOICE_KEY=""
@@ -408,28 +428,40 @@ board_name() {
   esac
 }
 
-# 把五项拼成一行给人看
+arch_name() {
+  case "$1" in
+    riscv) echo "RISC-V" ;;
+    *)     echo "ARM" ;;
+  esac
+}
+
+# 把六项拼成一行给人看（RP2040 板不显示架构，它只有 ARM）
 scheme_desc() {
-  local lgs ios
-  case "$2" in cpp) lgs="C++" ;; c) lgs="C" ;; *) lgs="$2" ;; esac
-  case "$3" in
+  local lgs ios out
+  case "$3" in cpp) lgs="C++" ;; c) lgs="C" ;; *) lgs="$3" ;; esac
+  case "$4" in
     usb)  ios="USB 串口" ;;
     uart) ios="UART" ;;
     both) ios="USB+UART" ;;
     none) ios="无串口" ;;
-    *)    ios="$3" ;;
+    *)    ios="$4" ;;
+  esac
+  out="$(board_name "$1")"
+  case "$1" in
+    pico2|pico2_w) out+=" / $(arch_name "$2")" ;;
   esac
   printf '%s / %s / %s / %s / %s' \
-    "$(board_name "$1")" "$lgs" "$ios" "${4:-无库}" "${5:-empty}"
+    "$out" "$lgs" "$ios" "${5:-无库}" "${6:-empty}"
 }
 
-# 读上次的方案，成功时按 BOARD|LANG|STDIO|LIBS|STARTER 一行输出
+# 读上次的方案，成功时按 BOARD|ARCH|LANG|STDIO|LIBS|STARTER 一行输出
 read_last() {
   [[ -f "$CONF_FILE" ]] || return 1
-  local b="" l="" s="" lb="" st="" k v
+  local b="" a="" l="" s="" lb="" st="" k v
   while IFS='=' read -r k v; do
     case "$k" in
       BOARD)   b="$v" ;;
+      ARCH)    a="$v" ;;
       LANG)    l="$v" ;;
       STDIO)   s="$v" ;;
       LIBS)    lb="$v" ;;
@@ -437,7 +469,8 @@ read_last() {
     esac
   done < "$CONF_FILE"
   [[ -n "$b" && -n "$l" && -n "$s" && -n "$st" ]] || return 1
-  printf '%s|%s|%s|%s|%s\n' "$b" "$l" "$s" "$lb" "$st"
+  [[ -n "$a" ]] || a="$DEF_ARCH"    # 旧版配置里没有 ARCH 行，按 ARM 处理
+  printf '%s|%s|%s|%s|%s|%s\n' "$b" "$a" "$l" "$s" "$lb" "$st"
 }
 
 # 新建成功后记下来，下次可以直接选
@@ -445,6 +478,7 @@ save_last() {
   mkdir -p "$(dirname "$CONF_FILE")"
   {
     printf 'BOARD=%s\n'   "$BOARD"
+    printf 'ARCH=%s\n'    "$ARCH"
     printf 'LANG=%s\n'    "$LANG_SEL"
     printf 'STDIO=%s\n'   "$STDIO_SEL"
     printf 'LIBS=%s\n'    "$LIBS_SEL"
@@ -460,27 +494,28 @@ if [[ $ASSUME_DEFAULT -eq 0 ]]; then
     [[ -n "$NAME" ]] && check_dir_free "$NAME"
   fi
 
-  # 五项都没从命令行给，才问方案；给了一部分就直接问剩下的
-  if [[ -z "$BOARD$LANG_SEL$STDIO_SEL$LIBS_SEL$STARTER" ]]; then
+  # 六项都没从命令行给，才问方案；给了一部分就直接问剩下的
+  if [[ -z "$BOARD$ARCH$LANG_SEL$STDIO_SEL$LIBS_SEL$STARTER" ]]; then
     last_dump="$(read_last || true)"
     if [[ -n "$last_dump" ]]; then
-      IFS='|' read -r _lb _ll _ls _llib _lst <<< "$last_dump"
+      IFS='|' read -r _lb _la _ll _ls _llib _lst <<< "$last_dump"
       choose_one "① 创建方案" \
-        "last|上次的方案（$(scheme_desc "$_lb" "$_ll" "$_ls" "$_llib" "$_lst")）" \
-        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
+        "last|上次的方案（$(scheme_desc "$_lb" "$_la" "$_ll" "$_ls" "$_llib" "$_lst")）" \
+        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_ARCH" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
         "manual|逐项选择"
     else
       choose_one "① 创建方案" \
-        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
+        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_ARCH" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
         "manual|逐项选择"
     fi
     case "$CHOICE_KEY" in
       last)
-        BOARD="$_lb"; LANG_SEL="$_ll"; STDIO_SEL="$_ls"; LIBS_SEL="$_llib"; STARTER="$_lst"
+        BOARD="$_lb"; ARCH="$_la"; LANG_SEL="$_ll"; STDIO_SEL="$_ls"
+        LIBS_SEL="$_llib"; STARTER="$_lst"
         SCHEME_CHOSEN=1 ;;
       default)
-        BOARD="$DEF_BOARD"; LANG_SEL="$DEF_LANG"; STDIO_SEL="$DEF_STDIO"
-        LIBS_SEL="$DEF_LIBS"; STARTER="$DEF_STARTER"
+        BOARD="$DEF_BOARD"; ARCH="$DEF_ARCH"; LANG_SEL="$DEF_LANG"
+        STDIO_SEL="$DEF_STDIO"; LIBS_SEL="$DEF_LIBS"; STARTER="$DEF_STARTER"
         SCHEME_CHOSEN=1 ;;
     esac
   fi
@@ -497,13 +532,28 @@ if [[ $ASSUME_DEFAULT -eq 0 ]]; then
     BOARD="$CHOICE_KEY"
   fi
 
+  # 架构只对 RP2350 有意义，RP2040 固定 ARM
+  if [[ -z "$ARCH" ]]; then
+    case "$BOARD" in
+      pico2|pico2_w)
+        choose_one "③ 内核架构" \
+          "arm|ARM（Cortex-M33，官方默认）" \
+          "riscv|RISC-V（Hazard3，需 riscv32 工具链）"
+        ARCH="$CHOICE_KEY"
+        ;;
+      *)
+        ARCH="arm"
+        ;;
+    esac
+  fi
+
   if [[ -z "$LANG_SEL" ]]; then
-    choose_one "③ 源文件语言" "c|C" "cpp|C++"
+    choose_one "④ 源文件语言" "c|C" "cpp|C++"
     LANG_SEL="$CHOICE_KEY"
   fi
 
   if [[ -z "$STDIO_SEL" ]]; then
-    choose_one "④ 串口输出方式" \
+    choose_one "⑤ 串口输出方式" \
       "usb|USB（插数据线即可 printf）" \
       "uart|UART0（GP0/GP1，需要 USB-TTL）" \
       "both|两者都开" \
@@ -512,7 +562,7 @@ if [[ $ASSUME_DEFAULT -eq 0 ]]; then
   fi
 
   if [[ -z "$LIBS_SEL" ]]; then
-    choose_many "⑤ 需要哪些功能库（可不选）" \
+    choose_many "⑥ 需要哪些功能库（可不选）" \
       "i2c|I2C 总线" \
       "spi|SPI 总线" \
       "pwm|PWM 输出" \
@@ -525,7 +575,7 @@ if [[ $ASSUME_DEFAULT -eq 0 ]]; then
   fi
 
   if [[ -z "$STARTER" ]]; then
-    choose_one "⑥ 起始代码" \
+    choose_one "⑦ 起始代码" \
       "blink|闪灯（最经典的起步）" \
       "serial|串口回显（收发测试）" \
       "pio|PIO 方波发生器（含 .pio 示例）" \
@@ -541,18 +591,49 @@ fi
 [[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || die "工程名只能包含字母、数字、下划线和连字符"
 
 BOARD="${BOARD:-$DEF_BOARD}"
+ARCH="${ARCH:-$DEF_ARCH}"
 LANG_SEL="${LANG_SEL:-$DEF_LANG}"
 STDIO_SEL="${STDIO_SEL:-$DEF_STDIO}"
 LIBS_SEL="${LIBS_SEL:-$DEF_LIBS}"
 STARTER="${STARTER:-$DEF_STARTER}"
 
 case "$BOARD" in pico2|pico2_w|pico|pico_w) ;; *) die "不支持的开发板：$BOARD" ;; esac
+case "$ARCH" in arm|riscv) ;; *) die "--arch 只能是 arm 或 riscv" ;; esac
 case "$LANG_SEL" in c|cpp) ;; *) die "--lang 只能是 c 或 cpp" ;; esac
 case "$STDIO_SEL" in usb|uart|both|none) ;; *) die "--stdio 只能是 usb/uart/both/none" ;; esac
 case "$STARTER" in blink|serial|pio|empty) ;; *) die "--starter 只能是 blink/serial/pio/empty" ;; esac
 
+# RP2040 只有 Cortex-M0+，没有第二个架构可选
+case "$BOARD" in
+  pico|pico_w)
+    [[ "$ARCH" == "arm" ]] || die "$BOARD 是 RP2040，只有 ARM 内核，不支持 --arch riscv"
+    ;;
+esac
+
+# 板子 + 架构 → SDK 的平台名，CMakeLists 里会写成 PICO_PLATFORM
+if [[ "$BOARD" == "pico2" || "$BOARD" == "pico2_w" ]]; then
+  if [[ "$ARCH" == "riscv" ]]; then PLATFORM="rp2350-riscv"; else PLATFORM="rp2350-arm-s"; fi
+else
+  PLATFORM="rp2040"
+fi
+
 [[ -d "$SDK_PATH" ]] || die "找不到 Pico SDK：$SDK_PATH
 请设置环境变量：export PICO_SDK_PATH=\$HOME/pico/pico-sdk"
+
+# RISC-V 要另装交叉工具链，缺了只是编不过，工程照样生成
+if [[ "$ARCH" == "riscv" ]]; then
+  RISCV_TRIPLE=""
+  for _t in riscv32-pico-elf riscv32-unknown-elf riscv32-corev-elf riscv-none-elf; do
+    if command -v "${_t}-gcc" >/dev/null 2>&1; then RISCV_TRIPLE="$_t"; break; fi
+  done
+  if [[ -n "$RISCV_TRIPLE" ]]; then
+    info "RISC-V 工具链：${RISCV_TRIPLE}-gcc"
+  else
+    warn "没找到 RISC-V 交叉工具链，工程会生成但 ./build.sh 会编译失败。"
+    warn "SDK 会依次尝试：riscv32-pico-elf / riscv32-unknown-elf / riscv32-corev-elf / riscv-none-elf"
+    warn "装好对应 triple 的 bare-metal GCC 后再编译即可，无需重新生成工程。"
+  fi
+fi
 
 PROJ_DIR="$PICO_ROOT/$NAME"
 [[ -e "$PROJ_DIR" ]] && die "目录已存在：$PROJ_DIR"
@@ -606,6 +687,13 @@ info "创建 $PROJ_DIR"
   echo '# （SDK 的 pico_sdk_import.cmake 会顺带加载平台配置，那时就把板子定成默认的 pico 了）'
   echo 'if(NOT PICO_BOARD)'
   echo "    set(PICO_BOARD $BOARD)"
+  echo 'endif()'
+  echo ''
+  echo '# 目标平台 —— 同样必须在 include SDK 之前设，否则板子对应的默认平台会被先定下来'
+  echo '#   RP2350: rp2350-arm-s（Cortex-M33）/ rp2350-riscv（Hazard3）'
+  echo '#   RP2040: rp2040'
+  echo 'if(NOT PICO_PLATFORM)'
+  echo "    set(PICO_PLATFORM $PLATFORM)"
   echo 'endif()'
   echo ''
   echo '# 引入 Pico SDK（依赖环境变量 PICO_SDK_PATH）'
@@ -880,6 +968,7 @@ EOF
   echo "| 项目 | 值 |"
   echo "|---|---|"
   echo "| 开发板 | \`$BOARD\` |"
+  echo "| 内核架构 | \`$ARCH\`（平台 \`$PLATFORM\`） |"
   echo "| 语言 | \`$LANG_SEL\` |"
   echo "| 串口 | \`$STDIO_SEL\` |"
   echo "| 功能库 | \`${LIBS_SEL:-无}\` |"

@@ -4,7 +4,8 @@ Pico SDK 工程生成器。通过交互式菜单或命令行参数创建可直�
 
 ## 功能
 
-- 交互式创建工程，五组选项：开发板、源文件语言、串口输出方式、功能库、起始代码
+- 交互式创建工程，六组选项：开发板、内核架构、源文件语言、串口输出方式、功能库、起始代码
+- RP2350 板可选 ARM（Cortex-M33）或 RISC-V（Hazard3）两种内核
 - 记忆上一次成功创建时使用的配置，支持一键复用
 - 生成的工程开箱即可编译，无需修改构建脚本
 - 配套 `build.sh` 提供编译、烧录、复位、串口监视、清理
@@ -18,7 +19,8 @@ Pico SDK 工程生成器。通过交互式菜单或命令行参数创建可直�
 | Linux | — | 已在 Manjaro（Arch 系）验证 |
 | bash | 4.0+ | 生成的脚本使用 `[[ ]]` 与数组 |
 | CMake | 3.13+ | Pico SDK 最低要求 |
-| arm-none-eabi-gcc | — | 交叉编译工具链 |
+| arm-none-eabi-gcc | — | ARM 交叉编译工具链，所有目标均需 |
+| riscv32 裸机 GCC | — | 仅 `--arch riscv` 需要，见下文 |
 | Pico SDK | 2.x | 通过 `PICO_SDK_PATH` 指定 |
 | picocom | — | 可选，用于 `build.sh monitor` |
 | udisksctl | — | 可选，用于自动挂载 BOOTSEL 设备 |
@@ -36,6 +38,24 @@ sudo pacman -S --needed arm-none-eabi-gcc arm-none-eabi-newlib cmake git python3
 ```
 
 `arm-none-eabi-newlib` 提供标准 C 库实现，缺失时链接阶段会报 `undefined reference`。
+
+### 安装 RISC-V 工具链（仅 `--arch riscv` 需要）
+
+RP2350 的 RISC-V 内核由 SDK 的 `pico_riscv_gcc` 工具链编译，SDK 按以下顺序查找编译器：
+
+1. `riscv32-pico-elf-gcc`
+2. `riscv32-unknown-elf-gcc`
+3. `riscv32-corev-elf-gcc`
+4. `riscv-none-elf-gcc`
+
+安装其中任意一套 bare-metal GCC，并保证可执行文件位于 `PATH` 中。piconew 在创建 RISC-V 工程时会检查该工具链，未找到时给出警告但照常生成工程；随后执行 `./build.sh` 会在配置阶段失败：
+
+```
+Compiler 'riscv32-pico-elf-gcc / riscv32-unknown-elf-gcc /
+riscv32-corev-elf-gcc / riscv-none-elf-gcc' not found
+```
+
+Arch 官方仓库中的 `riscv32-elf-binutils` 使用 `riscv32-elf` 前缀，不在上述查找列表内，单独安装它无法完成编译。
 
 ### 获取 Pico SDK
 
@@ -109,13 +129,19 @@ piconew
 piconew blinky
 ```
 
-五项全部指定，直接生成：
+六项全部指定，直接生成：
 
 ```bash
-piconew blinky --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink
+piconew blinky --board pico2 --arch arm --lang cpp --stdio usb --libs i2c,spi --starter blink
 ```
 
-五项全部采用默认方案：
+创建 RISC-V 工程（仅 RP2350 板可用，`--arch` 缺省为 `arm`）：
+
+```bash
+piconew blinky_rv --board pico2 --arch riscv --lang cpp --stdio usb --starter blink
+```
+
+六项全部采用默认方案：
 
 ```bash
 piconew blinky --default
@@ -133,11 +159,12 @@ cd ~/pico/blinky
 | 参数 | 取值 | 说明 |
 |---|---|---|
 | `--board` | `pico2` \| `pico2_w` \| `pico` \| `pico_w` | 目标开发板 |
+| `--arch` | `arm` \| `riscv` | 内核架构，缺省 `arm`；仅 RP2350 板可用 `riscv` |
 | `--lang` | `c` \| `cpp` | 源文件语言 |
 | `--stdio` | `usb` \| `uart` \| `both` \| `none` | 串口输出方式 |
 | `--libs` | 逗号分隔的库名列表 | 功能库，可留空 |
 | `--starter` | `blink` \| `serial` \| `pio` \| `empty` | 起始代码模板 |
-| `--default` | — | 五项全部使用默认方案，不与上述选项参数同时使用 |
+| `--default` | — | 六项全部使用默认方案，不与上述选项参数同时使用 |
 | `--print-build-sh` | — | 仅输出 `build.sh` 内容，用于升级已有工程 |
 | `-h`, `--help` | — | 显示帮助 |
 
@@ -147,8 +174,8 @@ cd ~/pico/blinky
 |---|---|
 | 未指定任何选项 | 交互式选择创建方案 |
 | 指定部分选项 | 指定的项直接采用，其余项逐一提问 |
-| 指定全部五项 | 不提问，直接生成 |
-| 仅指定 `--default` | 不提问，五项全部采用默认方案 |
+| 指定全部六项 | 不提问，直接生成 |
+| 仅指定 `--default` | 不提问，六项全部采用默认方案 |
 
 `--default` 与选项参数互斥。同时出现时命令报错退出，因为「全部使用默认方案」与「逐项指定取值」是两种互斥的意图。
 
@@ -158,16 +185,18 @@ cd ~/pico/blinky
 
 ```
 ① 创建方案
-  1) 上次的方案（Pico 2 / C++ / USB 串口 / 无库 / empty）
-  2) 默认方案（Pico 2 / C++ / USB 串口 / 无库 / empty）
+  1) 上次的方案（Pico 2 / ARM / C++ / USB 串口 / 无库 / empty）
+  2) 默认方案（Pico 2 / ARM / C++ / USB 串口 / 无库 / empty）
   3) 逐项选择
 ```
 
 | 选项 | 行为 |
 |---|---|
-| 上次的方案 | 复用上一次成功创建时的五项配置。无历史记录时不显示此项 |
-| 默认方案 | Pico 2 / C++ / USB 串口 / 无功能库 / 空模板 |
-| 逐项选择 | 依次询问五组选项 |
+| 上次的方案 | 复用上一次成功创建时的六项配置。无历史记录时不显示此项 |
+| 默认方案 | Pico 2 / ARM / C++ / USB 串口 / 无功能库 / 空模板 |
+| 逐项选择 | 依次询问六组选项 |
+
+RP2040 板（`pico`、`pico_w`）没有架构选项，`上次的方案` 与 `默认方案` 的显示中同样省略该段。逐项选择时该板型会跳过第 ③ 项，直接从 ② 进入 ④，编号保持不变便于对照。
 
 选择「上次的方案」或「默认方案」后不再逐项提问，直接生成工程。
 
@@ -183,6 +212,22 @@ cd ~/pico/blinky
 | `pico2_w` | Pico 2 W（RP2350，带无线模块） |
 | `pico` | Pico（RP2040） |
 | `pico_w` | Pico W（RP2040，带无线模块） |
+
+### 内核架构
+
+| 值 | 适用板型 | `PICO_PLATFORM` | 编译器 |
+|---|---|---|---|
+| `arm` | 全部板型，缺省值 | `rp2350-arm-s`（RP2350）/ `rp2040`（RP2040） | `arm-none-eabi-gcc` |
+| `riscv` | 仅 `pico2`、`pico2_w` | `rp2350-riscv` | `riscv32-*-elf-gcc` |
+
+RP2350 同时集成 ARM Cortex-M33 与 RISC-V Hazard3 两种内核，同一份源码可用任一架构编译，生成的 UF2 芯片标识不同：
+
+| 架构 | family ID |
+|---|---|
+| ARM | `0xe48bff57` |
+| RISC-V | `0xe48bff59` |
+
+`pico`、`pico_w` 为 RP2040，只有 Cortex-M0+，指定 `--arch riscv` 直接报错退出，不进入后续提问。板子与架构同时在命令行给出时立即校验，不再询问其余选项。
 
 ### 串口输出方式
 
@@ -223,7 +268,7 @@ cd ~/pico/blinky
 
 ```
 ~/pico/<工程名>/
-├── CMakeLists.txt          已配置开发板、功能库、串口方式
+├── CMakeLists.txt          已配置开发板、平台、功能库、串口方式
 ├── src/
 │   ├── main.c | main.cpp   起始代码
 │   └── square_wave.pio     仅 PIO 模板生成
@@ -272,27 +317,35 @@ pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/square_wa
 
 仅在功能库中勾选 `pio` 而不使用该起始代码时，不生成上述指令，需自行编写 `.pio` 文件并添加对应行。
 
-### 开发板设置顺序
+### 开发板与平台设置顺序
 
-生成的 `CMakeLists.txt` 将 `PICO_BOARD` 赋值置于 `include(pico_sdk_import.cmake)` 之前：
+生成的 `CMakeLists.txt` 将 `PICO_BOARD` 与 `PICO_PLATFORM` 的赋值置于 `include(pico_sdk_import.cmake)` 之前：
 
 ```cmake
 if(NOT PICO_BOARD)
     set(PICO_BOARD pico2)
 endif()
+
+if(NOT PICO_PLATFORM)
+    set(PICO_PLATFORM rp2350-arm-s)
+endif()
+
 include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 ```
 
-该顺序为必需。`pico_sdk_import.cmake` 在引入时即加载平台配置，若在其后设置 `PICO_BOARD`，变量已被默认值 `pico` 占用，条件不成立，最终生成 RP2040 固件。
+该顺序为必需。`pico_sdk_import.cmake` 在引入时即依据 `PICO_BOARD` 加载平台配置，若在其后设置这两个变量，`PICO_BOARD` 已被默认值 `pico` 占用，`PICO_PLATFORM` 也已被推导为 `rp2040`，条件不成立，最终生成 RP2040 固件。
 
-调整该顺序后必须删除 `build` 目录重新配置，`CMakeCache.txt` 中缓存的 `PICO_BOARD` 不会自动更新。
+架构差异体现在 `PICO_PLATFORM` 一行：RP2350 的 ARM 为 `rp2350-arm-s`，RISC-V 为 `rp2350-riscv`；RP2040 为 `rp2040`。`PICO_PLATFORM` 决定 SDK 选用哪套工具链文件，架构错误会直接表现为找不到编译器。
+
+修改 `PICO_BOARD` 或 `PICO_PLATFORM` 后必须删除 `build` 目录重新配置，`CMakeCache.txt` 中缓存的板型与平台不会自动更新。
 
 ## 配置持久化
 
-上一次使用的配置保存在 `~/.config/piconew/last.conf`，纯文本，五个键各占一行：
+上一次使用的配置保存在 `~/.config/piconew/last.conf`，纯文本，六个键各占一行：
 
 ```
 BOARD=pico2
+ARCH=arm
 LANG=cpp
 STDIO=usb
 LIBS=
@@ -300,6 +353,8 @@ STARTER=empty
 ```
 
 该文件可直接编辑；删除后等同于清除历史记录。仅在工程创建成功时写入。
+
+旧版本生成的配置文件只有五个键，缺少 `ARCH` 行时按 `arm` 处理，无需手工补写；下次创建成功后会自动补全。
 
 ## 环境变量
 
@@ -313,11 +368,13 @@ STARTER=empty
 
 ## 构建验证
 
-以下配置已实机编译通过（Pico SDK 2.3.1，`PICO_BOARD=pico2`）：
+以下配置已实机编译通过（Pico SDK 2.3.1）：
 
 | 配置 | 产物 |
 |---|---|
-| `--lang c --stdio usb --libs i2c,spi --starter blink` | 62 KB，含 `hardware_i2c`、`hardware_spi` |
-| `--lang cpp --stdio both --starter pio` | 67 KB，`.pio` 自动汇编成功 |
+| `--board pico2 --arch arm --lang c --stdio usb --libs i2c,spi --starter blink` | 62 KB，含 `hardware_i2c`、`hardware_spi` |
+| `--board pico2 --arch arm --lang cpp --stdio both --starter pio` | 67 KB，`.pio` 自动汇编成功 |
 
-生成固件的芯片标识为 RP2350（family `0xe48bff57`，载入地址 `0x10ffff00`）。
+ARM 固件的芯片标识为 RP2350 ARM-S（family `0xe48bff57`，载入地址 `0x10ffff00`）。
+
+`--arch riscv` 的工程已完成配置阶段验证：`PICO_PLATFORM` 被正确设为 `rp2350-riscv`，SDK 选中 `pico_riscv_gcc` 工具链文件。完整编译需额外安装 `riscv32-*` 裸机工具链，缺失时配置停在编译器查找一步，与生成器无关。
