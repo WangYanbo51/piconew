@@ -23,9 +23,68 @@ Pico SDK 工程生成器。通过交互式菜单或命令行参数创建可直�
 | picocom | — | 可选，用于 `build.sh monitor` |
 | udisksctl | — | 可选，用于自动挂载 BOOTSEL 设备 |
 
-Pico SDK 2.x 为 RP2350 支持的必要条件，1.x 版本无法编译 Pico 2 固件。
+## 准备构建环境
 
-## 安装
+piconew 生成的工程依赖交叉编译工具链与 Pico SDK 完成构建，首次使用前需完成以下配置。
+
+### 安装工具链
+
+Arch 系发行版：
+
+```bash
+sudo pacman -S --needed arm-none-eabi-gcc arm-none-eabi-newlib cmake git python3
+```
+
+`arm-none-eabi-newlib` 提供标准 C 库实现，缺失时链接阶段会报 `undefined reference`。
+
+### 获取 Pico SDK
+
+从源码获取（推荐，便于固定或切换版本）：
+
+```bash
+git clone https://github.com/raspberrypi/pico-sdk.git --branch master ~/pico/pico-sdk
+cd ~/pico/pico-sdk
+git submodule update --init
+```
+
+`git submodule update --init` 为必需步骤。TinyUSB、BTstack、mbedtls、lwIP 等组件以子模块形式提供，未初始化时 USB 串口功能不可用，配置阶段输出以下警告：
+
+```
+TinyUSB submodule has not been initialized; USB support will be unavailable
+```
+
+也可使用 Arch 系 AUR 提供的软件包：
+
+```bash
+yay -S pico-sdk
+```
+
+该方式安装路径为 `/usr/share/pico-sdk`，需相应调整下一节的 `PICO_SDK_PATH`。该包不在官方仓库中，`pacman -S pico-sdk` 会提示找不到目标。
+
+SDK 版本必须为 2.x。1.x 版本不包含 RP2350 支持，无法编译 Pico 2 固件。
+
+### 配置环境变量
+
+```bash
+export PICO_SDK_PATH="$HOME/pico/pico-sdk"
+```
+
+写入 shell 配置文件以持久生效（bash 用户改为 `~/.bashrc`）：
+
+```bash
+echo 'export PICO_SDK_PATH="$HOME/pico/pico-sdk"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+验证配置：
+
+```bash
+ls "$PICO_SDK_PATH/pico_sdk_init.cmake"
+```
+
+路径正确时该命令列出文件；若报 `No such file or directory`，说明变量为空或路径有误。
+
+## 安装 piconew
 
 ```bash
 git clone git@github.com:WangYanbo51/piconew.git ~/code/piconew
@@ -35,20 +94,6 @@ chmod +x ~/code/piconew/piconew
 ```
 
 未配置 SSH 密钥时，将仓库地址替换为 `https://github.com/WangYanbo51/piconew.git`。
-
-使用符号链接而非复制文件，可使 `git pull` 的更新立即生效。
-
-确认 `~/.local/bin` 已包含在 `PATH` 中：
-
-```bash
-echo $PATH | tr ':' '\n' | grep local
-```
-
-若未包含，在 shell 配置文件中追加：
-
-```bash
-export PATH="$HOME/.local/bin:$PATH"
-```
 
 ## 快速开始
 
@@ -67,7 +112,7 @@ piconew blinky
 跳过全部提问，直接生成：
 
 ```bash
-piconew blinky --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --yes
+piconew blinky --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --default
 ```
 
 进入工程目录编译：
@@ -86,11 +131,11 @@ cd ~/pico/blinky
 | `--stdio` | `usb` \| `uart` \| `both` \| `none` | 串口输出方式 |
 | `--libs` | 逗号分隔的库名列表 | 功能库，可留空 |
 | `--starter` | `blink` \| `serial` \| `pio` \| `empty` | 起始代码模板 |
-| `--yes` | — | 不对缺失项提问，使用默认值填充 |
+| `--default` | — | 不对缺失项提问，使用默认方案填充 |
 | `--print-build-sh` | — | 仅输出 `build.sh` 内容，用于升级已有工程 |
 | `-h`, `--help` | — | 显示帮助 |
 
-未通过命令行指定的选项，在交互模式下会依次提问；配合 `--yes` 时使用默认值。
+未通过命令行指定的选项，在交互模式下会依次提问；配合 `--default` 时使用默认方案填充。
 
 ## 创建方案
 
@@ -111,7 +156,7 @@ cd ~/pico/blinky
 
 选择「上次的方案」或「默认方案」后不再逐项提问，直接生成工程。
 
-默认方案同时作为 `--yes` 模式下缺失参数的填充值。
+默认方案同时作为 `--default` 模式下缺失参数的填充值。
 
 ## 选项参考
 
