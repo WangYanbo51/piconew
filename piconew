@@ -23,6 +23,7 @@ STDIO_SEL=""
 LIBS_SEL=""
 STARTER=""
 ASSUME_DEFAULT=0
+HAS_OPT=0
 PRINT_BUILD_SH=0
 SCHEME_CHOSEN=0
 
@@ -275,7 +276,8 @@ piconew — 快速创建 Pico SDK 工程
 用法：
   piconew                        交互式创建
   piconew 工程名                  指定名字，其余交互
-  piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --default
+  piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink
+  piconew 工程名 --default        五项全部使用默认方案，不提问
 
 交互流程第一步可选「创建方案」：
   上次的方案    复用上一次成功创建的选项（记在 ~/.config/piconew/last.conf）
@@ -288,7 +290,8 @@ piconew — 快速创建 Pico SDK 工程
   --stdio    usb | uart | both | none             串口输出方式
   --libs     i2c,spi,pwm,adc,uart,multicore,float,pio   功能库（逗号分隔）
   --starter  blink | serial | pio | empty         起始代码
-  --default  不提问，缺省项用默认方案填充（Pico 2 / C++ / USB / 无库 / 空模板）
+  --default  五项全部使用默认方案（Pico 2 / C++ / USB / 无库 / 空模板）
+             仅用于完全不指定选项的场合，不能与上面的选项参数同时使用
   --print-build-sh   只把 build.sh 内容打印到 stdout（给已有工程升级用）
   -h, --help 显示本帮助
 
@@ -302,11 +305,11 @@ EOF
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help) usage; exit 0 ;;
-    --board)   BOARD="${2:-}"; shift 2 ;;
-    --lang)    LANG_SEL="${2:-}"; shift 2 ;;
-    --stdio)   STDIO_SEL="${2:-}"; shift 2 ;;
-    --libs)    LIBS_SEL="${2:-}"; shift 2 ;;
-    --starter) STARTER="${2:-}"; shift 2 ;;
+    --board)   BOARD="${2:-}"; HAS_OPT=1; shift 2 ;;
+    --lang)    LANG_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
+    --stdio)   STDIO_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
+    --libs)    LIBS_SEL="${2:-}"; HAS_OPT=1; shift 2 ;;
+    --starter) STARTER="${2:-}"; HAS_OPT=1; shift 2 ;;
     --print-build-sh) PRINT_BUILD_SH=1; shift ;;
     --default) ASSUME_DEFAULT=1; shift ;;
     -*)        die "未知选项：$1（用 --help 查看用法）" ;;
@@ -315,6 +318,13 @@ while [[ $# -gt 0 ]]; do
       shift ;;
   esac
 done
+
+# --default 表示五项全部采用默认方案，与逐项指定互斥
+if [[ $ASSUME_DEFAULT -eq 1 && $HAS_OPT -eq 1 ]]; then
+  die "--default 与 --board/--lang/--stdio/--libs/--starter 不能同时使用
+--default 要求五项全部使用默认方案；若要指定其中若干项，直接给出这些参数即可，
+未给出的项会逐一询问。"
+fi
 
 # 只要打印 build.sh，用于给已有工程升级（不创建任何东西）
 if [[ $PRINT_BUILD_SH -eq 1 ]]; then
@@ -560,9 +570,8 @@ declare -A LIB_MAP=(
 )
 
 LINK_LIBS="    pico_stdlib"
-HAVE_PIO=0
-[[ "$LIBS_SEL" == *pio* ]] && HAVE_PIO=1
-[[ "$STARTER" == "pio" ]] && HAVE_PIO=1
+LINK_PIO=0        # 是否链接 hardware_pio
+PIO_TEMPLATE=0    # 是否生成 .pio 示例与 pico_generate_pio_header
 
 if [[ -n "$LIBS_SEL" ]]; then
   IFS=',' read -ra _libs <<< "$LIBS_SEL"
@@ -570,11 +579,20 @@ if [[ -n "$LIBS_SEL" ]]; then
     _l="${_l// /}"
     [[ -z "$_l" ]] && continue
     [[ -n "${LIB_MAP[$_l]:-}" ]] || die "未知功能库：$_l"
-    [[ "$_l" == "pio" ]] && continue   # pio 单独处理
+    if [[ "$_l" == "pio" ]]; then
+      LINK_PIO=1
+      continue   # pio 的链接单独处理，不参与示例模板判断
+    fi
     LINK_LIBS+=$'\n'"    ${LIB_MAP[$_l]}"
   done
 fi
-[[ $HAVE_PIO -eq 1 ]] && LINK_LIBS+=$'\n'"    hardware_pio"
+
+# 只有起始代码选 pio 时才生成 .pio 示例文件与对应的 CMake 指令
+[[ "$STARTER" == "pio" ]] && PIO_TEMPLATE=1
+# 使用该模板必然需要 PIO 库
+[[ $PIO_TEMPLATE -eq 1 ]] && LINK_PIO=1
+
+[[ $LINK_PIO -eq 1 ]] && LINK_LIBS+=$'\n'"    hardware_pio"
 
 # ---------------- 建目录 ----------------
 mkdir -p "$PROJ_DIR/src"
@@ -610,8 +628,8 @@ info "创建 $PROJ_DIR"
   echo 'add_executable(${PROJECT_NAME} ${SOURCES})'
   echo ''
 
-  if [[ $HAVE_PIO -eq 1 ]]; then
-    echo '# 编译时自动把 .pio 汇编成头文件（SDK 的便利之处，无需手工 pioasm）'
+  if [[ $PIO_TEMPLATE -eq 1 ]]; then
+    echo '# 编译期由 SDK 调用 pioasm 生成头文件'
     echo 'pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/square_wave.pio)'
     echo ''
   fi
@@ -636,7 +654,7 @@ info "创建 $PROJ_DIR"
 } > "$PROJ_DIR/CMakeLists.txt"
 
 # ---------------- .pio 文件 ----------------
-if [[ $HAVE_PIO -eq 1 ]]; then
+if [[ $PIO_TEMPLATE -eq 1 ]]; then
 cat > "$PROJ_DIR/src/square_wave.pio" <<'PIOEOF'
 ; 产生方波：从 FIFO 取一个数作为半周期计数，配合 clkdiv 调节频率
 .program square_wave
@@ -891,7 +909,7 @@ ok "工程已创建：$PROJ_DIR"
 echo ''
 printf '  %s\n' "$PROJ_DIR/CMakeLists.txt"
 printf '  %s\n' "$SRC_FILE"
-[[ $HAVE_PIO -eq 1 ]] && printf '  %s\n' "$PROJ_DIR/src/square_wave.pio"
+[[ $PIO_TEMPLATE -eq 1 ]] && printf '  %s\n' "$PROJ_DIR/src/square_wave.pio"
 printf '  %s\n' "$PROJ_DIR/build.sh"
 printf '  %s\n' "$PROJ_DIR/README.md"
 echo ''

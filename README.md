@@ -109,10 +109,16 @@ piconew
 piconew blinky
 ```
 
-跳过全部提问，直接生成：
+五项全部指定，直接生成：
 
 ```bash
-piconew blinky --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --default
+piconew blinky --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink
+```
+
+五项全部采用默认方案：
+
+```bash
+piconew blinky --default
 ```
 
 进入工程目录编译：
@@ -131,11 +137,20 @@ cd ~/pico/blinky
 | `--stdio` | `usb` \| `uart` \| `both` \| `none` | 串口输出方式 |
 | `--libs` | 逗号分隔的库名列表 | 功能库，可留空 |
 | `--starter` | `blink` \| `serial` \| `pio` \| `empty` | 起始代码模板 |
-| `--default` | — | 不对缺失项提问，使用默认方案填充 |
+| `--default` | — | 五项全部使用默认方案，不与上述选项参数同时使用 |
 | `--print-build-sh` | — | 仅输出 `build.sh` 内容，用于升级已有工程 |
 | `-h`, `--help` | — | 显示帮助 |
 
-未通过命令行指定的选项，在交互模式下会依次提问；配合 `--default` 时使用默认方案填充。
+参数与提问行为的关系：
+
+| 指定情况 | 行为 |
+|---|---|
+| 未指定任何选项 | 交互式选择创建方案 |
+| 指定部分选项 | 指定的项直接采用，其余项逐一提问 |
+| 指定全部五项 | 不提问，直接生成 |
+| 仅指定 `--default` | 不提问，五项全部采用默认方案 |
+
+`--default` 与选项参数互斥。同时出现时命令报错退出，因为「全部使用默认方案」与「逐项指定取值」是两种互斥的意图。
 
 ## 创建方案
 
@@ -156,7 +171,7 @@ cd ~/pico/blinky
 
 选择「上次的方案」或「默认方案」后不再逐项提问，直接生成工程。
 
-默认方案同时作为 `--default` 模式下缺失参数的填充值。
+命令行下的 `--default` 等价于选择「默认方案」，同样跳过全部提问。
 
 ## 选项参考
 
@@ -191,7 +206,7 @@ cd ~/pico/blinky
 | `uart` | `hardware_uart` | 额外 UART 通道 |
 | `multicore` | `pico_multicore` | 双核编程 |
 | `float` | `pico_float` | 硬件浮点 |
-| `pio` | `hardware_pio` | PIO 可编程 IO |
+| `pio` | `hardware_pio` | PIO 可编程 IO，仅链接库，不生成 `.pio` 文件 |
 
 ### 起始代码
 
@@ -199,8 +214,10 @@ cd ~/pico/blinky
 |---|---|
 | `blink` | 板载 LED 闪烁，串口输出计数 |
 | `serial` | 串口回显，用于收发测试 |
-| `pio` | PIO 方波发生器，含 `.pio` 示例 |
+| `pio` | PIO 方波发生器，含 `.pio` 示例，同时链接 `hardware_pio` |
 | `empty` | 仅包含最小的程序骨架 |
+
+功能库选 `pio` 与起始代码选 `pio` 相互独立：前者只链接 `hardware_pio`，供程序自行调用 PIO API，不产生任何 `.pio` 文件；后者额外生成 `src/square_wave.pio` 与 `pico_generate_pio_header` 指令。起始代码选 `empty` 而仍需 PIO 时，只添加功能库即可，不会出现多余的示例文件。
 
 ## 生成的项目结构
 
@@ -245,13 +262,15 @@ BOOTSEL 设备存在但未挂载时，调用 `udisksctl` 自动挂载；该步�
 
 ### PIO 头文件
 
-选择 PIO 相关选项后，`CMakeLists.txt` 包含：
+起始代码选择 `pio` 时，`CMakeLists.txt` 包含：
 
 ```cmake
 pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/square_wave.pio)
 ```
 
 编译期由 SDK 调用 pioasm 生成 `build/square_wave.pio.h`。修改 `.pio` 文件后重新编译即生效，生成的头文件不应手工修改。
+
+仅在功能库中勾选 `pio` 而不使用该起始代码时，不生成上述指令，需自行编写 `.pio` 文件并添加对应行。
 
 ### 开发板设置顺序
 
