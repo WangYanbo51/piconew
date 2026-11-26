@@ -1,0 +1,12 @@
+# 编译产物
+build/
+*.uf2
+*.elf
+*.bin
+*.hex
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,903 @@
+#!/usr/bin/env bash
+# =============================================================
+#  piconew —— Pico SDK 工程生成器
+#  交互式创建带选项的工程骨架，生成即可编译
+# =============================================================
+set -euo pipefail
+
+PICO_ROOT="${PICO_ROOT:-$HOME/pico}"
+SDK_PATH="${PICO_SDK_PATH:-$HOME/pico/pico-sdk}"
+CONF_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/piconew/last.conf"
+
+# 默认方案：Pico 2 / C++ / USB 串口 / 不选功能库 / 空模板
+DEF_BOARD="pico2"
+DEF_LANG="cpp"
+DEF_STDIO="usb"
+DEF_LIBS=""
+DEF_STARTER="empty"
+
+NAME=""
+BOARD=""
+LANG_SEL=""
+STDIO_SEL=""
+LIBS_SEL=""
+STARTER=""
+ASSUME_YES=0
+PRINT_BUILD_SH=0
+SCHEME_CHOSEN=0
+
+die() { printf '\033[31m错误：%s\033[0m\n' "$*" >&2; exit 1; }
+info() { printf '\033[36m%s\033[0m\n' "$*"; }
+ok() { printf '\033[32m%s\033[0m\n' "$*"; }
+
+# 项目内 build.sh 的唯一来源：既写入新工程，也能用 --print-build-sh 打印出来
+emit_build_sh() {
+cat <<'BUILDEOF'
+#!/usr/bin/env bash
+# =============================================================
+#  ./build.sh          编译
+#  ./build.sh flash    编译并烧录（板子不在 BOOTSEL 会自动复位）
+#  ./build.sh reset    只把板子复位进 BOOTSEL，不编译
+#  ./build.sh monitor  打开串口看输出（Ctrl+A 然后 X 退出）
+#  ./build.sh clean    清理
+# =============================================================
+set -e
+
+BUILD_DIR="build"
+BOOTSEL_TIMEOUT=20      # 等 U 盘出现的最大秒数
+
+if [ ! -d "${PICO_SDK_PATH:-}" ] && [ ! -d "$HOME/pico/pico-sdk" ]; then
+    echo "找不到 Pico SDK，请设置 PICO_SDK_PATH"
+    exit 1
+fi
+
+# ---------- 找 BOOTSEL 挂载点 ----------
+find_mount() {
+    local d m
+    for d in /run/media/"$USER" /media/"$USER" /run/media; do
+        [ -d "$d" ] || continue
+        m=$(find "$d" -maxdepth 1 -type d \( -name 'RP2350*' -o -name 'RPI-RP2*' \) 2>/dev/null | head -1)
+        if [ -n "$m" ]; then
+            echo "$m"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------- 找 BOOTSEL 块设备（没自动挂载时用） ----------
+find_blockdev() {
+    local listing name label
+    listing=$(lsblk -rno NAME,LABEL 2>/dev/null) || return 1
+    while read -r name label; do
+        case "$label" in
+            RP2350*|RPI-RP2*)
+                printf '/dev/%s\n' "$name"
+                return 0
+                ;;
+        esac
+    done <<< "$listing"
+    return 1
+}
+
+# ---------- 自动挂载（不需要 sudo） ----------
+auto_mount() {
+    local dev="$1"
+    if udisksctl mount -b "$dev" >/dev/null 2>&1; then
+        return 0
+    fi
+    echo "  自动挂载失败，手动挂：" >&2
+    echo "    sudo mkdir -p /mnt/pico && sudo mount $dev /mnt/pico" >&2
+    echo "  然后把 .uf2 复制进 /mnt/pico/" >&2
+    return 1
+}
+
+# ---------- 找 Pico 的串口 ----------
+# 靠 USB VID 2e8a 识别，避免误抓蓝牙、摄像头之类的 /dev/ttyACM*
+find_serial() {
+    local dev vid
+    for dev in /dev/ttyACM*; do
+        [ -e "$dev" ] || continue
+        vid=$(cat "/sys/class/tty/$(basename "$dev")/device/../idVendor" 2>/dev/null || true)
+        if [ "$vid" = "2e8a" ]; then
+            echo "$dev"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# ---------- 把运行中的板子复位进 BOOTSEL ----------
+reset_to_bootsel() {
+    local dev="$1"
+
+    if command -v picotool >/dev/null 2>&1; then
+        echo "  尝试 picotool reboot -f -u ..." >&2
+        if picotool reboot -f -u >/dev/null 2>&1; then
+            echo "  picotool 已发出复位命令" >&2
+            return 0
+        fi
+        echo "  picotool 失败，改用 1200 波特率" >&2
+    fi
+
+    echo "  用 1200 波特率触发复位: $dev" >&2
+    if stty -F "$dev" 1200 2>/dev/null; then
+        return 0
+    fi
+
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 -c 'import serial,sys; s=serial.Serial(sys.argv[1],1200,timeout=1); s.close()' "$dev" >/dev/null 2>&1; then
+            echo "  stty 失败，pyserial 成功" >&2
+            return 0
+        fi
+    fi
+
+    echo "  复位失败：stty 和 pyserial 都没成功" >&2
+    echo "  如果 picocom 或串口助手正占用该端口，请先退出" >&2
+    return 1
+}
+
+# ---------- 有块设备但没自动挂载时，挂上并返回挂载点 ----------
+ensure_mounted() {
+    local dev
+    dev=$(find_blockdev) || return 1
+    auto_mount "$dev" || return 1
+    find_mount
+}
+
+# ---------- 等挂载点出现 ----------
+# 每轮都顺带处理「设备已经在，但桌面没给挂载」的情况
+wait_mount() {
+    local limit="$1" i m
+    for ((i = 0; i < limit * 2; i++)); do
+        if m=$(find_mount) || m=$(ensure_mounted); then
+            echo "$m"
+            return 0
+        fi
+        sleep 0.5
+    done
+    return 1
+}
+
+# ---------- 保证板子处于 BOOTSEL，成功时把挂载点打到 stdout ----------
+# 所有提示走 stderr，这样调用方可以 MOUNT=$(ensure_bootsel)
+ensure_bootsel() {
+    local mount dev
+
+    if mount=$(find_mount); then
+        echo "板子已在 BOOTSEL: $mount" >&2
+        echo "$mount"
+        return 0
+    fi
+
+    if mount=$(ensure_mounted); then
+        echo "板子在 BOOTSEL，已自动挂载: $mount" >&2
+        echo "$mount"
+        return 0
+    fi
+
+    if dev=$(find_serial); then
+        echo "检测到板子在运行模式（$dev），不是 BOOTSEL" >&2
+        if ! reset_to_bootsel "$dev"; then
+            return 1
+        fi
+        echo "  等待 U 盘出现，最多 ${BOOTSEL_TIMEOUT}s ..." >&2
+        if mount=$(wait_mount "$BOOTSEL_TIMEOUT"); then
+            echo "  已进入 BOOTSEL: $mount" >&2
+            echo "$mount"
+            return 0
+        fi
+        echo "  超时没等到 U 盘。程序可能已卡死，只能按住 BOOTSEL 重新插拔。" >&2
+        return 1
+    fi
+
+    echo "没找到板子：既没有 BOOTSEL 的 U 盘，也没有串口设备" >&2
+    echo "请检查 USB 线，或按住 BOOTSEL 键插上" >&2
+    return 1
+}
+
+# ---------- 打开串口看输出 ----------
+monitor() {
+    local dev
+    if ! dev=$(find_serial); then
+        echo "没找到 Pico 的串口（/dev/ttyACM* 里没有 VID 2e8a 的设备）" >&2
+        echo "板子插上了吗？程序在跑吗？（在 BOOTSEL 里是不会出串口的）" >&2
+        return 1
+    fi
+    if ! command -v picocom >/dev/null 2>&1; then
+        echo "没装 picocom：sudo pacman -S picocom" >&2
+        return 1
+    fi
+    echo "串口 $dev，波特率 115200"
+    echo "退出：先按 Ctrl+A，松手，再按 X"
+    echo ""
+    picocom -b 115200 "$dev"
+}
+
+case "${1:-}" in
+    monitor|serial|mon)
+        monitor || exit 1
+        exit 0
+        ;;
+    clean)
+        [ -d "$BUILD_DIR" ] && rm -rf "$BUILD_DIR"
+        echo "已清理"
+        exit 0
+        ;;
+    reset)
+        MOUNT=$(ensure_bootsel) || exit 1
+        echo "已处于 BOOTSEL: $MOUNT"
+        exit 0
+        ;;
+esac
+
+PROJECT_NAME=$(grep -oP 'set\(PROJECT_NAME\s+\K[^\)]+' CMakeLists.txt | head -1 | tr -d ' ')
+if [ -z "$PROJECT_NAME" ]; then
+    echo "没能从 CMakeLists.txt 读到 PROJECT_NAME"
+    exit 1
+fi
+UF2="$BUILD_DIR/$PROJECT_NAME.uf2"
+
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
+cmake .. > /dev/null
+make -j"$(nproc)"
+cd ..
+
+if [ ! -f "$UF2" ]; then
+    echo "没找到 $UF2"
+    exit 1
+fi
+
+echo ""
+echo "编译完成: $(pwd)/$UF2"
+ls -lh "$UF2"
+
+if [ "${1:-}" = "flash" ]; then
+    echo ""
+    if ! MOUNT=$(ensure_bootsel); then
+        exit 1
+    fi
+    echo "写入 $MOUNT ..."
+    cp "$UF2" "$MOUNT/"
+    sync
+    echo "完成，板子会自动重启运行新固件"
+    echo ""
+    echo "看串口：./build.sh monitor"
+fi
+BUILDEOF
+}
+
+usage() {
+cat <<'EOF'
+piconew — 快速创建 Pico SDK 工程
+
+用法：
+  piconew                        交互式创建
+  piconew 工程名                  指定名字，其余交互
+  piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --yes
+
+交互流程第一步可选「创建方案」：
+  上次的方案    复用上一次成功创建的选项（记在 ~/.config/piconew/last.conf）
+  默认方案      Pico 2 / C++ / USB 串口 / 不选功能库 / 空模板
+  逐项选择      依次问开发板、语言、串口、功能库、起始代码
+
+选项：
+  --board    pico2 | pico2_w | pico | pico_w      开发板
+  --lang     c | cpp                              源文件语言
+  --stdio    usb | uart | both | none             串口输出方式
+  --libs     i2c,spi,pwm,adc,uart,multicore,float,pio   功能库（逗号分隔）
+  --starter  blink | serial | pio | empty         起始代码
+  --yes      不提问，缺省项用默认方案填充（Pico 2 / C++ / USB / 无库 / 空模板）
+  --print-build-sh   只把 build.sh 内容打印到 stdout（给已有工程升级用）
+  -h, --help 显示本帮助
+
+环境变量：
+  PICO_ROOT      工程根目录，默认 ~/pico
+  PICO_SDK_PATH  SDK 路径，默认 ~/pico/pico-sdk
+EOF
+}
+
+# ---------------- 参数解析 ----------------
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help) usage; exit 0 ;;
+    --board)   BOARD="${2:-}"; shift 2 ;;
+    --lang)    LANG_SEL="${2:-}"; shift 2 ;;
+    --stdio)   STDIO_SEL="${2:-}"; shift 2 ;;
+    --libs)    LIBS_SEL="${2:-}"; shift 2 ;;
+    --starter) STARTER="${2:-}"; shift 2 ;;
+    --print-build-sh) PRINT_BUILD_SH=1; shift ;;
+    --yes|-y)  ASSUME_YES=1; shift ;;
+    -*)        die "未知选项：$1（用 --help 查看用法）" ;;
+    *)
+      if [[ -z "$NAME" ]]; then NAME="$1"; else die "多余的参数：$1"; fi
+      shift ;;
+  esac
+done
+
+# 只要打印 build.sh，用于给已有工程升级（不创建任何东西）
+if [[ $PRINT_BUILD_SH -eq 1 ]]; then
+  emit_build_sh
+  exit 0
+fi
+
+# ---------------- 目录占用检查 ----------------
+# 名字一旦确定就立刻查，不要等问完五个选项才报错
+check_dir_free() {
+  local d="$PICO_ROOT/$1"
+  if [[ -e "$d" ]]; then
+    die "目录已存在：$d
+换个工程名，或先把它删掉/移走再重试。"
+  fi
+}
+
+# 名字是从命令行给的，这里就先查一遍
+[[ -n "$NAME" ]] && check_dir_free "$NAME"
+
+# ---------------- 选择菜单 ----------------
+CHOICE_KEY=""
+choose_one() {
+  local title="$1"; shift
+  local keys=() labels=() item
+  for item in "$@"; do
+    keys+=("${item%%|*}")
+    labels+=("${item#*|}")
+  done
+  printf '\n%s\n' "$title" >&2
+  local i
+  for ((i=0; i<${#labels[@]}; i++)); do
+    printf '  %d) %s\n' "$((i+1))" "${labels[$i]}" >&2
+  done
+  local ans
+  while true; do
+    read -e -r -p "请选择 [1-${#labels[@]}]: " ans || die "输入结束"
+    if [[ "$ans" =~ ^[0-9]+$ ]] && (( ans >= 1 && ans <= ${#labels[@]} )); then
+      CHOICE_KEY="${keys[$((ans-1))]}"
+      return 0
+    fi
+    printf '  无效输入，请重试\n' >&2
+  done
+}
+
+CHOICE_MULTI=()
+choose_many() {
+  local title="$1"; shift
+  local keys=() labels=() item
+  for item in "$@"; do
+    keys+=("${item%%|*}")
+    labels+=("${item#*|}")
+  done
+  printf '\n%s\n' "$title" >&2
+  local i
+  for ((i=0; i<${#labels[@]}; i++)); do
+    printf '  %d) %s\n' "$((i+1))" "${labels[$i]}" >&2
+  done
+  local ans
+  read -e -r -p '可多选，用逗号分隔编号（例如 1,3），直接回车表示都不选: ' ans || ans=""
+  CHOICE_MULTI=()
+  if [[ -z "${ans// /}" ]]; then return 0; fi
+  local parts p
+  IFS=',' read -ra parts <<< "$ans"
+  for p in "${parts[@]}"; do
+    p="${p// /}"
+    if [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#keys[@]} )); then
+      CHOICE_MULTI+=("${keys[$((p-1))]}")
+    fi
+  done
+}
+
+# ---------------- 方案：上次 / 默认 ----------------
+board_name() {
+  case "$1" in
+    pico2)   echo "Pico 2" ;;
+    pico2_w) echo "Pico 2 W" ;;
+    pico)    echo "Pico" ;;
+    pico_w)  echo "Pico W" ;;
+    *)       echo "$1" ;;
+  esac
+}
+
+# 把五项拼成一行给人看
+scheme_desc() {
+  local lgs ios
+  case "$2" in cpp) lgs="C++" ;; c) lgs="C" ;; *) lgs="$2" ;; esac
+  case "$3" in
+    usb)  ios="USB 串口" ;;
+    uart) ios="UART" ;;
+    both) ios="USB+UART" ;;
+    none) ios="无串口" ;;
+    *)    ios="$3" ;;
+  esac
+  printf '%s / %s / %s / %s / %s' \
+    "$(board_name "$1")" "$lgs" "$ios" "${4:-无库}" "${5:-empty}"
+}
+
+# 读上次的方案，成功时按 BOARD|LANG|STDIO|LIBS|STARTER 一行输出
+read_last() {
+  [[ -f "$CONF_FILE" ]] || return 1
+  local b="" l="" s="" lb="" st="" k v
+  while IFS='=' read -r k v; do
+    case "$k" in
+      BOARD)   b="$v" ;;
+      LANG)    l="$v" ;;
+      STDIO)   s="$v" ;;
+      LIBS)    lb="$v" ;;
+      STARTER) st="$v" ;;
+    esac
+  done < "$CONF_FILE"
+  [[ -n "$b" && -n "$l" && -n "$s" && -n "$st" ]] || return 1
+  printf '%s|%s|%s|%s|%s\n' "$b" "$l" "$s" "$lb" "$st"
+}
+
+# 新建成功后记下来，下次可以直接选
+save_last() {
+  mkdir -p "$(dirname "$CONF_FILE")"
+  {
+    printf 'BOARD=%s\n'   "$BOARD"
+    printf 'LANG=%s\n'    "$LANG_SEL"
+    printf 'STDIO=%s\n'   "$STDIO_SEL"
+    printf 'LIBS=%s\n'    "$LIBS_SEL"
+    printf 'STARTER=%s\n' "$STARTER"
+  } > "$CONF_FILE"
+}
+
+# ---------------- 交互式补全 ----------------
+if [[ $ASSUME_YES -eq 0 ]]; then
+  if [[ -z "$NAME" ]]; then
+    read -e -r -p '工程名（例如 blinky）: ' NAME || die "输入结束"
+    # 名字一确认就查，存在就报，不进后面的选项
+    [[ -n "$NAME" ]] && check_dir_free "$NAME"
+  fi
+
+  # 五项都没从命令行给，才问方案；给了一部分就直接问剩下的
+  if [[ -z "$BOARD$LANG_SEL$STDIO_SEL$LIBS_SEL$STARTER" ]]; then
+    last_dump="$(read_last || true)"
+    if [[ -n "$last_dump" ]]; then
+      IFS='|' read -r _lb _ll _ls _llib _lst <<< "$last_dump"
+      choose_one "① 创建方案" \
+        "last|上次的方案（$(scheme_desc "$_lb" "$_ll" "$_ls" "$_llib" "$_lst")）" \
+        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
+        "manual|逐项选择"
+    else
+      choose_one "① 创建方案" \
+        "default|默认方案（$(scheme_desc "$DEF_BOARD" "$DEF_LANG" "$DEF_STDIO" "$DEF_LIBS" "$DEF_STARTER")）" \
+        "manual|逐项选择"
+    fi
+    case "$CHOICE_KEY" in
+      last)
+        BOARD="$_lb"; LANG_SEL="$_ll"; STDIO_SEL="$_ls"; LIBS_SEL="$_llib"; STARTER="$_lst"
+        SCHEME_CHOSEN=1 ;;
+      default)
+        BOARD="$DEF_BOARD"; LANG_SEL="$DEF_LANG"; STDIO_SEL="$DEF_STDIO"
+        LIBS_SEL="$DEF_LIBS"; STARTER="$DEF_STARTER"
+        SCHEME_CHOSEN=1 ;;
+    esac
+  fi
+
+  # 选了上次/默认方案就不再逐项问；只有「逐项选择」或从命令行给了部分参数才问
+  if [[ $SCHEME_CHOSEN -eq 0 ]]; then
+
+  if [[ -z "$BOARD" ]]; then
+    choose_one "② 选择开发板" \
+      "pico2|Pico 2 (RP2350)" \
+      "pico2_w|Pico 2 W (RP2350 + WiFi)" \
+      "pico|Pico (RP2040)" \
+      "pico_w|Pico W (RP2040 + WiFi)"
+    BOARD="$CHOICE_KEY"
+  fi
+
+  if [[ -z "$LANG_SEL" ]]; then
+    choose_one "③ 源文件语言" "c|C" "cpp|C++"
+    LANG_SEL="$CHOICE_KEY"
+  fi
+
+  if [[ -z "$STDIO_SEL" ]]; then
+    choose_one "④ 串口输出方式" \
+      "usb|USB（插数据线即可 printf）" \
+      "uart|UART0（GP0/GP1，需要 USB-TTL）" \
+      "both|两者都开" \
+      "none|不开（最省空间）"
+    STDIO_SEL="$CHOICE_KEY"
+  fi
+
+  if [[ -z "$LIBS_SEL" ]]; then
+    choose_many "⑤ 需要哪些功能库（可不选）" \
+      "i2c|I2C 总线" \
+      "spi|SPI 总线" \
+      "pwm|PWM 输出" \
+      "adc|模拟输入 ADC" \
+      "uart|额外 UART" \
+      "multicore|多核（两个核心分工）" \
+      "float|硬件浮点加速" \
+      "pio|PIO 可编程 IO"
+    LIBS_SEL="$(IFS=,; echo "${CHOICE_MULTI[*]:-}")"
+  fi
+
+  if [[ -z "$STARTER" ]]; then
+    choose_one "⑥ 起始代码" \
+      "blink|闪灯（最经典的起步）" \
+      "serial|串口回显（收发测试）" \
+      "pio|PIO 方波发生器（含 .pio 示例）" \
+      "empty|空模板（只剩骨架）"
+    STARTER="$CHOICE_KEY"
+  fi
+
+  fi   # SCHEME_CHOSEN
+fi
+
+# ---------------- 校验 ----------------
+[[ -n "$NAME" ]] || die "工程名不能为空"
+[[ "$NAME" =~ ^[a-zA-Z0-9_-]+$ ]] || die "工程名只能包含字母、数字、下划线和连字符"
+
+BOARD="${BOARD:-$DEF_BOARD}"
+LANG_SEL="${LANG_SEL:-$DEF_LANG}"
+STDIO_SEL="${STDIO_SEL:-$DEF_STDIO}"
+LIBS_SEL="${LIBS_SEL:-$DEF_LIBS}"
+STARTER="${STARTER:-$DEF_STARTER}"
+
+case "$BOARD" in pico2|pico2_w|pico|pico_w) ;; *) die "不支持的开发板：$BOARD" ;; esac
+case "$LANG_SEL" in c|cpp) ;; *) die "--lang 只能是 c 或 cpp" ;; esac
+case "$STDIO_SEL" in usb|uart|both|none) ;; *) die "--stdio 只能是 usb/uart/both/none" ;; esac
+case "$STARTER" in blink|serial|pio|empty) ;; *) die "--starter 只能是 blink/serial/pio/empty" ;; esac
+
+[[ -d "$SDK_PATH" ]] || die "找不到 Pico SDK：$SDK_PATH
+请设置环境变量：export PICO_SDK_PATH=\$HOME/pico/pico-sdk"
+
+PROJ_DIR="$PICO_ROOT/$NAME"
+[[ -e "$PROJ_DIR" ]] && die "目录已存在：$PROJ_DIR"
+
+# ---------------- 库映射 ----------------
+declare -A LIB_MAP=(
+  [i2c]=hardware_i2c
+  [spi]=hardware_spi
+  [pwm]=hardware_pwm
+  [adc]=hardware_adc
+  [uart]=hardware_uart
+  [multicore]=pico_multicore
+  [float]=pico_float
+  [pio]=hardware_pio
+)
+
+LINK_LIBS="    pico_stdlib"
+HAVE_PIO=0
+[[ "$LIBS_SEL" == *pio* ]] && HAVE_PIO=1
+[[ "$STARTER" == "pio" ]] && HAVE_PIO=1
+
+if [[ -n "$LIBS_SEL" ]]; then
+  IFS=',' read -ra _libs <<< "$LIBS_SEL"
+  for _l in "${_libs[@]}"; do
+    _l="${_l// /}"
+    [[ -z "$_l" ]] && continue
+    [[ -n "${LIB_MAP[$_l]:-}" ]] || die "未知功能库：$_l"
+    [[ "$_l" == "pio" ]] && continue   # pio 单独处理
+    LINK_LIBS+=$'\n'"    ${LIB_MAP[$_l]}"
+  done
+fi
+[[ $HAVE_PIO -eq 1 ]] && LINK_LIBS+=$'\n'"    hardware_pio"
+
+# ---------------- 建目录 ----------------
+mkdir -p "$PROJ_DIR/src"
+info "创建 $PROJ_DIR"
+
+# ---------------- CMakeLists.txt ----------------
+{
+  echo 'cmake_minimum_required(VERSION 3.13)'
+  echo ''
+  echo '# 目标开发板 —— 必须在 include SDK 之前设，否则不生效'
+  echo '# （SDK 的 pico_sdk_import.cmake 会顺带加载平台配置，那时就把板子定成默认的 pico 了）'
+  echo 'if(NOT PICO_BOARD)'
+  echo "    set(PICO_BOARD $BOARD)"
+  echo 'endif()'
+  echo ''
+  echo '# 引入 Pico SDK（依赖环境变量 PICO_SDK_PATH）'
+  echo 'include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)'
+  echo ''
+  echo "set(PROJECT_NAME $NAME)"
+  echo ''
+  echo 'project(${PROJECT_NAME} C CXX ASM)'
+  echo 'set(CMAKE_C_STANDARD 11)'
+  echo 'set(CMAKE_CXX_STANDARD 17)'
+  echo ''
+  echo 'pico_sdk_init()'
+  echo ''
+  echo '# 自动收集 src/ 下的所有源文件，新增 .c/.cpp 不用改这里'
+  echo 'file(GLOB SOURCES'
+  echo '    ${CMAKE_CURRENT_LIST_DIR}/src/*.c'
+  echo '    ${CMAKE_CURRENT_LIST_DIR}/src/*.cpp'
+  echo ')'
+  echo ''
+  echo 'add_executable(${PROJECT_NAME} ${SOURCES})'
+  echo ''
+
+  if [[ $HAVE_PIO -eq 1 ]]; then
+    echo '# 编译时自动把 .pio 汇编成头文件（SDK 的便利之处，无需手工 pioasm）'
+    echo 'pico_generate_pio_header(${PROJECT_NAME} ${CMAKE_CURRENT_LIST_DIR}/src/square_wave.pio)'
+    echo ''
+  fi
+
+  echo 'target_link_libraries(${PROJECT_NAME}'
+  echo "$LINK_LIBS"
+  echo ')'
+  echo ''
+  echo 'pico_add_extra_outputs(${PROJECT_NAME})'
+  echo ''
+
+  case "$STDIO_SEL" in
+    usb)  echo 'pico_enable_stdio_usb(${PROJECT_NAME} 1)'
+          echo 'pico_enable_stdio_uart(${PROJECT_NAME} 0)' ;;
+    uart) echo 'pico_enable_stdio_usb(${PROJECT_NAME} 0)'
+          echo 'pico_enable_stdio_uart(${PROJECT_NAME} 1)' ;;
+    both) echo 'pico_enable_stdio_usb(${PROJECT_NAME} 1)'
+          echo 'pico_enable_stdio_uart(${PROJECT_NAME} 1)' ;;
+    none) echo 'pico_enable_stdio_usb(${PROJECT_NAME} 0)'
+          echo 'pico_enable_stdio_uart(${PROJECT_NAME} 0)' ;;
+  esac
+} > "$PROJ_DIR/CMakeLists.txt"
+
+# ---------------- .pio 文件 ----------------
+if [[ $HAVE_PIO -eq 1 ]]; then
+cat > "$PROJ_DIR/src/square_wave.pio" <<'PIOEOF'
+; 产生方波：从 FIFO 取一个数作为半周期计数，配合 clkdiv 调节频率
+.program square_wave
+    pull block
+    mov y, osr
+.wrap_target
+    set pins, 1
+    mov x, y
+delay_hi:
+    jmp x-- delay_hi
+    set pins, 0
+    mov x, y
+delay_lo:
+    jmp x-- delay_lo
+.wrap
+
+% c-sdk {
+#include "hardware/clocks.h"
+
+static inline void square_wave_program_init(PIO pio, uint sm, uint offset,
+                                            uint pin, uint half_ticks, uint32_t freq_hz) {
+    pio_gpio_init(pio, pin);
+    pio_sm_set_consecutive_pindirs(pio, sm, pin, 1, true);
+
+    pio_sm_config c = square_wave_program_get_default_config(offset);
+    sm_config_set_set_pins(&c, pin, 1);
+
+    float div = (float)clock_get_hz(clk_sys) / ((float)freq_hz * (float)half_ticks * 4.0f);
+    sm_config_set_clkdiv(&c, div);
+
+    pio_sm_init(pio, sm, offset, &c);
+    pio_sm_set_enabled(pio, sm, true);
+    pio_sm_put_blocking(pio, sm, half_ticks - 1);
+}
+%}
+PIOEOF
+fi
+
+# ---------------- 起始代码 ----------------
+SRC_EXT="c"; [[ "$LANG_SEL" == "cpp" ]] && SRC_EXT="cpp"
+SRC_FILE="$PROJ_DIR/src/main.$SRC_EXT"
+
+if [[ "$LANG_SEL" == "cpp" ]]; then
+  INC_STDIO='#include <cstdio>'
+else
+  INC_STDIO='#include <stdio.h>'
+fi
+
+case "$STARTER" in
+  blink)
+    if [[ "$LANG_SEL" == "cpp" ]]; then
+cat > "$SRC_FILE" <<'EOF'
+#include <cstdio>
+#include "pico/stdlib.h"
+
+// 板载 LED：官方 Pico / Pico 2 是 GP25
+#ifndef PICO_DEFAULT_LED_PIN
+#define PICO_DEFAULT_LED_PIN 25
+#endif
+
+int main() {
+    stdio_init_all();
+
+    const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+
+    int count = 0;
+    while (true) {
+        gpio_put(LED_PIN, 1);
+        printf("LED ON   (%d)\n", ++count);
+        sleep_ms(500);
+
+        gpio_put(LED_PIN, 0);
+        printf("LED OFF  (%d)\n", count);
+        sleep_ms(500);
+    }
+    return 0;
+}
+EOF
+    else
+cat > "$SRC_FILE" <<'EOF'
+#include <stdio.h>
+#include "pico/stdlib.h"
+
+// 板载 LED：官方 Pico / Pico 2 是 GP25
+#ifndef PICO_DEFAULT_LED_PIN
+#define PICO_DEFAULT_LED_PIN 25
+#endif
+
+int main() {
+    stdio_init_all();
+
+    const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+
+    int count = 0;
+    while (true) {
+        gpio_put(LED_PIN, 1);
+        printf("LED ON   (%d)\n", ++count);
+        sleep_ms(500);
+
+        gpio_put(LED_PIN, 0);
+        printf("LED OFF  (%d)\n", count);
+        sleep_ms(500);
+    }
+    return 0;
+}
+EOF
+    fi
+    ;;
+
+  serial)
+    if [[ "$LANG_SEL" == "cpp" ]]; then HEAD='#include <cstdio>'; else HEAD='#include <stdio.h>'; fi
+cat > "$SRC_FILE" <<EOF
+$HEAD
+#include "pico/stdlib.h"
+
+int main() {
+    stdio_init_all();
+
+    printf("串口就绪，输入字符会回显；输入 q 退出循环\n");
+
+    int count = 0;
+    while (true) {
+        int c = getchar_timeout_us(0);   // 非阻塞读一个字符
+        if (c != PICO_ERROR_TIMEOUT) {
+            if (c == 'q') break;
+            printf("收到: %c  (累计 %d 个)\n", c, ++count);
+        }
+        sleep_ms(10);
+    }
+
+    printf("循环结束，继续闪灯\n");
+    const uint LED_PIN = PICO_DEFAULT_LED_PIN;
+    gpio_init(LED_PIN);
+    gpio_set_dir(LED_PIN, GPIO_OUT);
+    while (true) {
+        gpio_put(LED_PIN, 1); sleep_ms(200);
+        gpio_put(LED_PIN, 0); sleep_ms(200);
+    }
+    return 0;
+}
+EOF
+    ;;
+
+  pio)
+    if [[ "$LANG_SEL" == "cpp" ]]; then HEAD='#include <cstdio>'; else HEAD='#include <stdio.h>'; fi
+cat > "$SRC_FILE" <<EOF
+$HEAD
+#include "pico/stdlib.h"
+#include "hardware/pio.h"
+#include "square_wave.pio.h"     // 由 CMake 在编译时自动生成
+
+#define OUT_PIN 15
+#define FREQ_HZ 1000
+
+int main() {
+    stdio_init_all();
+    sleep_ms(1500);               // 等 USB 串口枚举完成
+
+    PIO pio = pio0;
+    uint sm = pio_claim_unused_sm(pio, true);
+    uint offset = pio_add_program(pio, &square_wave_program);
+
+    square_wave_program_init(pio, sm, offset, OUT_PIN, 16, FREQ_HZ);
+
+    printf("方波已启动: GP%d, %d Hz\n", OUT_PIN, FREQ_HZ);
+    printf("状态机 %u，指令偏移 %u\n", sm, offset);
+
+    while (true) {
+        tight_loop_contents();
+    }
+    return 0;
+}
+EOF
+    ;;
+
+  empty)
+    if [[ "$LANG_SEL" == "cpp" ]]; then HEAD='#include <cstdio>'; else HEAD='#include <stdio.h>'; fi
+cat > "$SRC_FILE" <<EOF
+$HEAD
+#include "pico/stdlib.h"
+
+int main() {
+    stdio_init_all();
+
+    printf("Hello from Pico\n");
+
+    while (true) {
+        tight_loop_contents();
+    }
+    return 0;
+}
+EOF
+    ;;
+esac
+
+# ---------------- build.sh ----------------
+emit_build_sh > "$PROJ_DIR/build.sh"
+chmod +x "$PROJ_DIR/build.sh"
+
+# ---------------- .gitignore ----------------
+cat > "$PROJ_DIR/.gitignore" <<'EOF'
+build/
+*.uf2
+*.elf
+*.bin
+*.hex
+*.dis
+*.map
+EOF
+
+# ---------------- 工程 README ----------------
+{
+  echo "# $NAME"
+  echo ''
+  echo "Pico SDK 工程，由 piconew 生成。"
+  echo ''
+  echo "## 配置"
+  echo ''
+  echo "| 项目 | 值 |"
+  echo "|---|---|"
+  echo "| 开发板 | \`$BOARD\` |"
+  echo "| 语言 | \`$LANG_SEL\` |"
+  echo "| 串口 | \`$STDIO_SEL\` |"
+  echo "| 功能库 | \`${LIBS_SEL:-无}\` |"
+  echo "| 起始代码 | \`$STARTER\` |"
+  echo ''
+  echo "## 常用命令"
+  echo ''
+  echo '```bash'
+  echo './build.sh          # 编译'
+  echo './build.sh flash    # 编译并烧录'
+  echo './build.sh monitor  # 看串口输出'
+  echo './build.sh clean    # 清理'
+  echo '```'
+  echo ''
+  echo "看串口输出用 \`./build.sh monitor\`（退出：Ctrl+A 然后 X）"
+  echo ''
+  echo "## 加代码"
+  echo ''
+  echo "往 \`src/\` 里丢 \`.c\` 或 \`.cpp\` 文件即可，CMake 会自动收集，不用改 CMakeLists。"
+} > "$PROJ_DIR/README.md"
+
+# ---------------- 完成 ----------------
+save_last
+
+echo ''
+ok "工程已创建：$PROJ_DIR"
+echo ''
+printf '  %s\n' "$PROJ_DIR/CMakeLists.txt"
+printf '  %s\n' "$SRC_FILE"
+[[ $HAVE_PIO -eq 1 ]] && printf '  %s\n' "$PROJ_DIR/src/square_wave.pio"
+printf '  %s\n' "$PROJ_DIR/build.sh"
+printf '  %s\n' "$PROJ_DIR/README.md"
+echo ''
+info "下一步："
+echo "  cd $PROJ_DIR && ./build.sh"
+if [[ "$STARTER" == "pio" ]]; then
+  echo ""
+  echo "  PIO 头文件由 CMake 自动生成，不需要手工运行 pioasm"
+fi
