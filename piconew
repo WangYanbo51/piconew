@@ -22,7 +22,7 @@ LANG_SEL=""
 STDIO_SEL=""
 LIBS_SEL=""
 STARTER=""
-ASSUME_YES=0
+ASSUME_DEFAULT=0
 PRINT_BUILD_SH=0
 SCHEME_CHOSEN=0
 
@@ -275,7 +275,7 @@ piconew — 快速创建 Pico SDK 工程
 用法：
   piconew                        交互式创建
   piconew 工程名                  指定名字，其余交互
-  piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --yes
+  piconew 工程名 --board pico2 --lang cpp --stdio usb --libs i2c,spi --starter blink --default
 
 交互流程第一步可选「创建方案」：
   上次的方案    复用上一次成功创建的选项（记在 ~/.config/piconew/last.conf）
@@ -288,7 +288,7 @@ piconew — 快速创建 Pico SDK 工程
   --stdio    usb | uart | both | none             串口输出方式
   --libs     i2c,spi,pwm,adc,uart,multicore,float,pio   功能库（逗号分隔）
   --starter  blink | serial | pio | empty         起始代码
-  --yes      不提问，缺省项用默认方案填充（Pico 2 / C++ / USB / 无库 / 空模板）
+  --default  不提问，缺省项用默认方案填充（Pico 2 / C++ / USB / 无库 / 空模板）
   --print-build-sh   只把 build.sh 内容打印到 stdout（给已有工程升级用）
   -h, --help 显示本帮助
 
@@ -308,7 +308,7 @@ while [[ $# -gt 0 ]]; do
     --libs)    LIBS_SEL="${2:-}"; shift 2 ;;
     --starter) STARTER="${2:-}"; shift 2 ;;
     --print-build-sh) PRINT_BUILD_SH=1; shift ;;
-    --yes|-y)  ASSUME_YES=1; shift ;;
+    --default) ASSUME_DEFAULT=1; shift ;;
     -*)        die "未知选项：$1（用 --help 查看用法）" ;;
     *)
       if [[ -z "$NAME" ]]; then NAME="$1"; else die "多余的参数：$1"; fi
@@ -443,7 +443,7 @@ save_last() {
 }
 
 # ---------------- 交互式补全 ----------------
-if [[ $ASSUME_YES -eq 0 ]]; then
+if [[ $ASSUME_DEFAULT -eq 0 ]]; then
   if [[ -z "$NAME" ]]; then
     read -e -r -p '工程名（例如 blinky）: ' NAME || die "输入结束"
     # 名字一确认就查，存在就报，不进后面的选项
