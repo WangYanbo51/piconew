@@ -5,10 +5,15 @@
 ## 安装
 
 ```bash
+git clone git@github.com:WangYanbo51/piconew.git ~/code/piconew
 mkdir -p ~/.local/bin
-cp piconew ~/.local/bin/piconew
-chmod +x ~/.local/bin/piconew
+ln -sf ~/code/piconew/piconew ~/.local/bin/piconew
+chmod +x ~/code/piconew/piconew
 ```
+
+没配 SSH key 的话，把地址换成 `https://github.com/WangYanbo51/piconew.git`。
+
+用软链接而不是 `cp`，这样 `git pull` 更新后立刻生效，不用再复制一次。
 
 确认 `~/.local/bin` 在 PATH 里：
 
