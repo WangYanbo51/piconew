@@ -8,7 +8,7 @@ Pico SDK 工程生成器。通过交互式菜单或命令行参数创建可直�
 - RP2350 板可选 ARM（Cortex-M33）或 RISC-V（Hazard3）两种内核
 - 记忆上一次成功创建时使用的配置，支持一键复用
 - 生成的工程开箱即可编译，无需修改构建脚本
-- 配套 `build.sh` 提供编译、烧录、复位、串口监视、清理
+- 配套 `build.sh` 提供编译、烧录、复位、串口监视、工程信息查询、清理
 - `.pio` 文件由 SDK 在编译期自动调用 pioasm 转为头文件
 - 新增源文件无需修改 `CMakeLists.txt`
 
@@ -285,7 +285,37 @@ RP2350 同时集成 ARM Cortex-M33 与 RISC-V Hazard3 两种内核，同一份�
 | `./build.sh flash` | 编译并烧录。板子未处于 BOOTSEL 时自动复位 |
 | `./build.sh reset` | 仅将板子复位至 BOOTSEL，不编译 |
 | `./build.sh monitor` | 打开串口监视（别名 `mon`、`serial`） |
+| `./build.sh info` | 打印当前工程信息，不编译 |
 | `./build.sh clean` | 删除 `build` 目录 |
+
+`info` 从 `CMakeLists.txt` 与实际文件现场读取，输出示例：
+
+```
+工程：pwm_breath
+路径：/home/user/pico/pwm_breath
+开发板：pico2
+平台：rp2350-arm-s（ARM）
+串口：USB
+链接库：pico_stdlib hardware_pwm
+源文件：main.cpp
+SDK：/usr/share/pico-sdk（2.3.1）
+工具链：arm-none-eabi-gcc 16.2.0
+产物：build/pwm_breath.uf2（60K，RP2350 ARM-S，2026-11-26 21:19）
+串口设备：未检测到（没插板子，或板子在 BOOTSEL 模式）
+```
+
+各项来源：
+
+| 字段 | 来源 |
+|---|---|
+| 开发板 / 平台 | `CMakeLists.txt` 中的 `PICO_BOARD` / `PICO_PLATFORM`；未显式设置时按开发板默认推导 |
+| 串口 | `pico_enable_stdio_usb` 与 `pico_enable_stdio_uart` 的取值 |
+| 链接库 | `target_link_libraries` 块内列出的库 |
+| 源文件 | `src/` 下的 `.c` / `.cpp` / `.pio` |
+| SDK / 工具链 | `PICO_SDK_PATH` 下的版本文件、`PATH` 中对应的交叉编译器 |
+| 产物 | `build/<工程名>.uf2` 的大小、时间与 UF2 芯片标识（偏移 `0x1C`） |
+
+产物芯片标识与平台不符时额外输出警告，用于发现 `build/` 中是旧配置编出的固件。`info` 不依赖 Pico SDK 是否存在，SDK 路径异常时同样可以执行；`monitor`、`reset`、`clean` 同理，只有编译与烧录才要求 SDK 就位。
 
 `monitor` 通过 USB VID `2e8a` 定位串口设备，避免选中其他 `/dev/ttyACM*`。退出 picocom 为依次按下 `Ctrl+A`、`X`。
 
@@ -377,4 +407,31 @@ STARTER=empty
 
 ARM 固件的芯片标识为 RP2350 ARM-S（family `0xe48bff57`，载入地址 `0x10ffff00`）。
 
-`--arch riscv` 的工程已完成配置阶段验证：`PICO_PLATFORM` 被正确设为 `rp2350-riscv`，SDK 选中 `pico_riscv_gcc` 工具链文件。完整编译需额外安装 `riscv32-*` 裸机工具链，缺失时配置停在编译器查找一步，与生成器无关。
+`--arch riscv` 的工程可完成配置与编译：`PICO_PLATFORM` 被正确设为 `rp2350-riscv`，SDK 选中 `pico_riscv_gcc` 工具链文件。链接阶段能否通过取决于工具链本身是否与 Hazard3 目标相符，详见下一节。
+
+### RISC-V 工具链的架构属性匹配
+
+使用 AUR 的 `riscv32-gnu-toolchain-elf-bin`（riscv-collab 2026.10.29，GCC 16.1.0）编译 RISC-V 工程时，链接会失败：
+
+```
+ld: failed to merge target specific data of file .../libc.a(libc_a-fclose.o)
+collect2: error: ld returned 1 exit status
+```
+
+原因不在生成器。SDK 为 Hazard3 生成的编译参数为：
+
+```
+-march=rv32ima_zicsr_zifencei_zba_zbb_zbs_zbkb_zca_zcb_zcmp -mabi=ilp32
+```
+
+而该工具链的 `libc.a` 按 `rv32i_m_a_f_d_c` 构建（含浮点 F/D 与完整 C 扩展），两者 `Tag_RISCV_arch` 无法合并。该包只提供一份 libc，没有可按 `-march` 匹配的 multilib 子目录，因此无法回避。
+
+`-mstrict-align` 不是原因，`-DPICO_NO_STRICT_ALIGN=1` 去掉该参数后仍然失败。
+
+可改用与 Hazard3 相符的工具链（如 AUR 的 `riscv32-corev-elf-gcc-bin`、xPack 的 `riscv-none-elf-gcc`），其 libc 不含 F/D，属性可以合并。判断依据：
+
+```bash
+riscv32-unknown-elf-readelf -A <工具链>/lib/libc.a | grep Tag_RISCV_arch
+```
+
+`Tag_RISCV_arch` 中不应出现 `f`、`d` 扩展。

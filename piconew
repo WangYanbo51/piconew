@@ -43,17 +43,14 @@ cat <<'BUILDEOF'
 #  ./build.sh flash    编译并烧录（板子不在 BOOTSEL 会自动复位）
 #  ./build.sh reset    只把板子复位进 BOOTSEL，不编译
 #  ./build.sh monitor  打开串口看输出（Ctrl+A 然后 X 退出）
+#  ./build.sh info     打印当前工程信息（板型、平台、工具链、产物等）
 #  ./build.sh clean    清理
 # =============================================================
 set -e
 
 BUILD_DIR="build"
 BOOTSEL_TIMEOUT=20      # 等 U 盘出现的最大秒数
-
-if [ ! -d "${PICO_SDK_PATH:-}" ] && [ ! -d "$HOME/pico/pico-sdk" ]; then
-    echo "找不到 Pico SDK，请设置 PICO_SDK_PATH"
-    exit 1
-fi
+SDK_DIR="${PICO_SDK_PATH:-$HOME/pico/pico-sdk}"
 
 # ---------- 找 BOOTSEL 挂载点 ----------
 find_mount() {
@@ -218,13 +215,155 @@ monitor() {
     picocom -b 115200 "$dev"
 }
 
+# ---------- 打印当前工程信息 ----------
+# 全部从 CMakeLists.txt 与实际文件现场读取，不依赖额外的记录文件
+cmake_value() {   # 取 set(KEY value) 里的 value
+    grep -oP "set\(\s*$1\s+\K[^\)\s]+" CMakeLists.txt 2>/dev/null | head -1
+}
+
+show_info() {
+    local name board platform arch chip fam expect derived
+    local usb uart stdio libs srcs pio sdkver tc dev uf2 size
+
+    name=$(cmake_value PROJECT_NAME)
+    if [ -z "$name" ]; then
+        echo "没能从 CMakeLists.txt 读到 PROJECT_NAME（当前目录是工程根目录吗？）" >&2
+        return 1
+    fi
+    board=$(cmake_value PICO_BOARD)
+    platform=$(cmake_value PICO_PLATFORM)
+
+    # 没写 PICO_PLATFORM 的老工程，按 SDK 的默认推导规则补上
+    derived="$platform"
+    if [ -z "$derived" ]; then
+        case "$board" in
+            pico2|pico2_w) derived="rp2350-arm-s" ;;
+            pico|pico_w)   derived="rp2040" ;;
+        esac
+    fi
+
+    # 架构由平台名推断，RP2040 与 rp2350-arm-s 都是 ARM
+    case "$derived" in
+        *riscv*) arch="RISC-V" ;;
+        *)       arch="ARM" ;;
+    esac
+
+    # 串口方式：看 CMakeLists 里的两个开关
+    usb=$(grep -oP 'pico_enable_stdio_usb\(\$\{PROJECT_NAME\}\s+\K[01]' CMakeLists.txt 2>/dev/null | head -1)
+    uart=$(grep -oP 'pico_enable_stdio_uart\(\$\{PROJECT_NAME\}\s+\K[01]' CMakeLists.txt 2>/dev/null | head -1)
+    usb=${usb:-0}
+    uart=${uart:-0}
+    if [ "$usb" = 1 ] && [ "$uart" = 1 ]; then
+        stdio="USB + UART"
+    elif [ "$usb" = 1 ]; then
+        stdio="USB"
+    elif [ "$uart" = 1 ]; then
+        stdio="UART"
+    else
+        stdio="无"
+    fi
+
+    # 链接的库：target_link_libraries 块内每行一个库名
+    libs=$(sed -n '/^target_link_libraries/,/^)/p' CMakeLists.txt 2>/dev/null \
+           | grep -oE '^[[:space:]]+[A-Za-z0-9_]+' | tr -d ' ' | paste -sd' ' -)
+
+    srcs=$(ls src/*.c src/*.cpp 2>/dev/null | xargs -r -n1 basename | paste -sd' ' -)
+    if [ -z "$srcs" ]; then
+        srcs="无"
+    fi
+    pio=""
+    if ls src/*.pio >/dev/null 2>&1; then
+        pio=$(ls src/*.pio | xargs -n1 basename | paste -sd' ' -)
+    fi
+
+    sdkver=""
+    if [ -f "$SDK_DIR/pico_sdk_version.cmake" ]; then
+        sdkver=$(grep -oP 'set\(PICO_SDK_VERSION_(MAJOR|MINOR|REVISION)\s+\K[0-9]+' \
+                 "$SDK_DIR/pico_sdk_version.cmake" | paste -sd. -)
+    fi
+
+    # 工具链：以平台决定该用哪一套
+    tc=""
+    case "$derived" in
+        *riscv*)
+            for t in riscv32-pico-elf riscv32-unknown-elf riscv32-corev-elf riscv-none-elf; do
+                if command -v "$t-gcc" >/dev/null 2>&1; then
+                    tc="$t-gcc $("$t-gcc" -dumpversion 2>/dev/null)"
+                    break
+                fi
+            done
+            ;;
+        *)
+            if command -v arm-none-eabi-gcc >/dev/null 2>&1; then
+                tc="arm-none-eabi-gcc $(arm-none-eabi-gcc -dumpversion 2>/dev/null)"
+            fi
+            ;;
+    esac
+
+    echo "工程：$name"
+    echo "路径：$(pwd)"
+    echo "开发板：${board:-未设置（SDK 默认 pico / RP2040）}"
+    if [ -z "$platform" ]; then
+        echo "平台：${derived:-未设置}（$arch，CMakeLists 未显式设置，按开发板默认）"
+    else
+        echo "平台：$platform（$arch）"
+    fi
+    echo "串口：$stdio"
+    echo "链接库：${libs:-无}"
+    echo "源文件：$srcs"
+    if [ -n "$pio" ]; then
+        echo "PIO 文件：$pio"
+    fi
+    echo "SDK：$SDK_DIR${sdkver:+（$sdkver）}"
+    echo "工具链：${tc:-未找到}"
+
+    uf2="$BUILD_DIR/$name.uf2"
+    if [ -f "$uf2" ]; then
+        size=$(du -h "$uf2" | cut -f1)
+        # UF2 每个 512 字节块的第 0x1C 字节起是芯片标识，小端存放
+        fam=$(od -An -tx1 -j 28 -N 4 "$uf2" | awk '{printf "0x%s%s%s%s", $4, $3, $2, $1}')
+        case "$fam" in
+            0xe48bff57) chip="RP2350 ARM-S" ;;
+            0xe48bff59) chip="RP2350 RISC-V" ;;
+            0xe48bff56) chip="RP2040" ;;
+            *)          chip="未知标识" ;;
+        esac
+        echo "产物：$uf2（$size，$chip，$(date -r "$uf2" '+%Y-%m-%d %H:%M')）"
+
+        # 平台与产物芯片标识不符，说明 build/ 里是旧配置编出来的
+        case "$derived" in
+            *riscv*) expect="0xe48bff59" ;;
+            rp2350*) expect="0xe48bff57" ;;
+            rp2040*) expect="0xe48bff56" ;;
+            *)       expect="" ;;
+        esac
+        if [ -n "$expect" ] && [ "$fam" != "$expect" ]; then
+            echo "警告：产物芯片标识与平台不一致（期望 $expect，实际 $fam），build/ 可能是旧的，先执行 ./build.sh clean"
+        fi
+    else
+        echo "产物：未编译（没找到 $uf2）"
+    fi
+
+    if dev=$(find_serial); then
+        echo "串口设备：$dev"
+    else
+        echo "串口设备：未检测到（没插板子，或板子在 BOOTSEL 模式）"
+    fi
+}
+
 case "${1:-}" in
     monitor|serial|mon)
         monitor || exit 1
         exit 0
         ;;
+    info)
+        show_info || exit 1
+        exit 0
+        ;;
     clean)
-        [ -d "$BUILD_DIR" ] && rm -rf "$BUILD_DIR"
+        if [ -d "$BUILD_DIR" ]; then
+            rm -rf "$BUILD_DIR"
+        fi
         echo "已清理"
         exit 0
         ;;
@@ -234,6 +373,12 @@ case "${1:-}" in
         exit 0
         ;;
 esac
+
+if [ ! -d "$SDK_DIR" ]; then
+    echo "找不到 Pico SDK：$SDK_DIR"
+    echo "请设置环境变量：export PICO_SDK_PATH=\$HOME/pico/pico-sdk"
+    exit 1
+fi
 
 PROJECT_NAME=$(grep -oP 'set\(PROJECT_NAME\s+\K[^\)]+' CMakeLists.txt | head -1 | tr -d ' ')
 if [ -z "$PROJECT_NAME" ]; then
@@ -980,6 +1125,7 @@ EOF
   echo './build.sh          # 编译'
   echo './build.sh flash    # 编译并烧录'
   echo './build.sh monitor  # 看串口输出'
+  echo './build.sh info     # 打印当前工程信息'
   echo './build.sh clean    # 清理'
   echo '```'
   echo ''
