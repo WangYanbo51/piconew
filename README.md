@@ -54,7 +54,7 @@ ls "$PICO_SDK_PATH/pico_sdk_init.cmake"
 SDK 按 `riscv32-pico-elf-gcc`、`riscv32-unknown-elf-gcc`、`riscv32-corev-elf-gcc`、`riscv-none-elf-gcc` 的顺序查找编译器，装任意一套并置于 `PATH` 即可。官方预编译版本见 <https://github.com/raspberrypi/pico-sdk-tools/releases>，使用时需设置：
 
 ```bash
-export PICO_TOOLCHAIN_PATH=/opt/riscv/riscv-toolchain-14/
+export PICO_TOOLCHAIN_PATH=/path/to/riscv-toolchain-16/
 ```
 
 Arch 仓库的 `riscv32-elf-binutils` 前缀不在查找列表内，单独安装无法完成编译。
@@ -130,7 +130,7 @@ cd ~/pico/blinky
 
 `pio` 作为功能库只链接 `hardware_pio`，不生成 `.pio` 文件；作为起始代码才生成 `src/square_wave.pio`。两者相互独立。
 
-UF2 芯片标识：ARM 为 `0xe48bff57`，RISC-V 为 `0xe48bff59`，RP2040 为 `0xe48bff56`。
+UF2 芯片标识：RP2350 ARM-S 为 `0xe48bff59`，RP2350 RISC-V 为 `0xe48bff5a`，RP2040 为 `0xe48bff56`。`0xe48bff57` 是 `ABSOLUTE_FAMILY_ID`，用于 ABS 块，与芯片无关。
 
 ## 项目结构
 
@@ -204,6 +204,6 @@ Pico SDK 2.3.1 实测通过：
 
 | 配置 | 产物 |
 |---|---|
-| `--arch arm --lang c --stdio usb --libs i2c,spi --starter blink` | 62 KB，family `0xe48bff57` |
+| `--arch arm --lang c --stdio usb --libs i2c,spi --starter blink` | 62 KB，family `0xe48bff59` |
 | `--arch arm --lang cpp --stdio both --starter pio` | 67 KB，`.pio` 自动汇编成功 |
 | `--arch riscv --lang cpp --stdio usb --libs pwm --starter empty` | 配置与编译通过，链接取决于工具链属性 |
