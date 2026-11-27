@@ -139,6 +139,7 @@ UF2 芯片标识：RP2350 ARM-S 为 `0xe48bff59`，RP2350 RISC-V 为 `0xe48bff5a
 │   ├── main.c | main.cpp   起始代码
 │   └── square_wave.pio     仅 PIO 模板生成
 ├── build.sh                编译 / 烧录 / 复位 / 串口监视 / 工程信息 / 清理
+├── compile_commands.json   编译时自动生成，供 clangd 使用
 ├── .gitignore
 └── README.md
 ```
@@ -152,7 +153,7 @@ UF2 芯片标识：RP2350 ARM-S 为 `0xe48bff59`，RP2350 RISC-V 为 `0xe48bff5a
 | `./build.sh reset` | 仅复位至 BOOTSEL，不编译 |
 | `./build.sh monitor` | 串口监视（别名 `mon`、`serial`），`Ctrl+A` 后按 `X` 退出 |
 | `./build.sh info` | 打印当前工程信息 |
-| `./build.sh clean` | 删除 `build` 目录 |
+| `./build.sh clean` | 删除 `build` 目录，保留 `compile_commands.json` |
 
 `info` 输出示例：
 
@@ -173,6 +174,18 @@ SDK：/usr/share/pico-sdk（2.3.1）
 字段均从 `CMakeLists.txt` 与磁盘文件现场读取。产物芯片标识与平台不符时给出告警，用于发现 `build/` 中是旧配置编出的固件。`info`、`monitor`、`reset`、`clean` 不要求 SDK 就位。
 
 烧录顺序：已挂载 `RP2350` / `RPI-RP2` 则直接写入；否则依次用 `picotool reboot`、1200 波特率、pyserial 复位后写入；均失败则提示手动进入 BOOTSEL。设备存在但未挂载时调用 `udisksctl` 自动挂载。
+
+## 编辑器支持（clangd）
+
+编译时以 `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON` 配置，并在工程根目录生成 `compile_commands.json`。该文件由 CMake 的原始导出结果重写而来，处理三处 clangd 无法直接消费的内容：
+
+| 问题 | 处理方式 |
+|---|---|
+| 缺少 `--target`，clangd 按宿主 x86_64 解析，`-mcpu=cortex-m33` 直接报错 | 按编译器名补 `--target=arm-none-eabi` 或 `--target=riscv32-unknown-elf` |
+| newlib 与 libstdc++ 的头路径由 gcc 驱动隐式提供，数据库里没有，`<cstdio>` 找不到 | 向编译器查询后写成显式 `-isystem` |
+| `-mcpu=hazard3-rp2350` 为 GCC 专有 CPU 名，clang 不识别 | 逐条剔除 |
+
+文件置于工程根目录，clangd 从源文件目录逐级向上查找即可命中，编辑器侧无需任何参数或 `.clangd` 配置。`clean` 不删除该文件，重新编译时覆盖更新。
 
 ## 说明
 

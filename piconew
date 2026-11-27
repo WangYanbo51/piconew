@@ -44,7 +44,7 @@ cat <<'BUILDEOF'
 #  ./build.sh reset    只把板子复位进 BOOTSEL，不编译
 #  ./build.sh monitor  打开串口看输出（Ctrl+A 然后 X 退出）
 #  ./build.sh info     打印当前工程信息（板型、平台、工具链、产物等）
-#  ./build.sh clean    清理
+#  ./build.sh clean    清理（保留 compile_commands.json）
 # =============================================================
 set -e
 
@@ -379,6 +379,82 @@ print(max(order, key=lambda k: counts[k]) if counts else '0x00000000')
 PYEOF
 }
 
+# ---------- 生成 clangd 可直接使用的编译数据库 ----------
+# CMake 导出的 compile_commands.json 原样给 clangd 用不了，原因有三：
+#   1) 没有 --target，clangd 按宿主 x86_64 解析，-mcpu=cortex-m33 直接报错
+#   2) newlib / libstdc++ 的头路径由 gcc 驱动隐式提供，数据库里没有，<cstdio> 找不到
+#   3) RISC-V 的 -mcpu=hazard3-rp2350 是 GCC 专有 CPU 名，clang 不认
+# 这里逐条重写：补 --target、删掉 clang 不认的参数、把驱动提供的系统头显式写成 -isystem，
+# 结果放到工程根目录。clangd 从源文件目录逐级向上查找，编辑器侧无需任何配置。
+gen_cdb() {
+    local src="$1/compile_commands.json"
+    [ -f "$src" ] || return 0
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "未安装 python3，跳过编译数据库生成"
+        return 0
+    fi
+    python3 - "$src" "./compile_commands.json" <<'PYEOF' || echo "编译数据库生成失败，不影响固件"
+import json, os, shlex, subprocess, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+db = json.load(open(src))
+if not db:
+    sys.exit(0)
+
+
+def argv_of(e):
+    return e.get('arguments') or shlex.split(e.get('command', ''))
+
+
+first = argv_of(db[0])
+if not first:
+    sys.exit(0)
+
+compiler = first[0]
+triple = 'riscv32-unknown-elf' if 'riscv' in os.path.basename(compiler) else 'arm-none-eabi'
+
+# 向编译器本身问出系统头搜索路径
+sysinc = []
+try:
+    p = subprocess.run([compiler, '-E', '-v', '-x', 'c++', '-'],
+                       input='', stdout=subprocess.DEVNULL,
+                       stderr=subprocess.PIPE, text=True, timeout=60)
+    lines = p.stderr.splitlines()
+    a = next(i for i, l in enumerate(lines) if 'search starts here' in l)
+    b = next(i for i, l in enumerate(lines) if 'End of search list' in l)
+    sysinc = [os.path.normpath(l.strip()) for l in lines[a + 1:b] if l.strip()]
+except Exception:
+    sysinc = []
+
+out = []
+for e in db:
+    args = argv_of(e)
+    keep, i = [], 0
+    while i < len(args):
+        a = args[i]
+        if a == '-o':                 # -o 输出文件与 -c 对 clangd 无用
+            i += 2
+            continue
+        if a == '-c':
+            i += 1
+            continue
+        if a.startswith('-mcpu=hazard3'):
+            i += 1
+            continue
+        keep.append(a)
+        i += 1
+    if not keep:
+        continue
+    args = [keep[0], '--target=' + triple] + keep[1:]
+    for d in sysinc:
+        args += ['-isystem', d]
+    out.append({'directory': e['directory'], 'file': e['file'], 'arguments': args})
+
+json.dump(out, open(dst, 'w'), indent=1)
+print('编译数据库：compile_commands.json（%d 条，target=%s）' % (len(out), triple))
+PYEOF
+}
+
 case "${1:-}" in
     monitor|serial|mon)
         monitor || exit 1
@@ -392,7 +468,8 @@ case "${1:-}" in
         if [ -d "$BUILD_DIR" ]; then
             rm -rf "$BUILD_DIR"
         fi
-        echo "已清理"
+        # 工程根目录的 compile_commands.json 刻意保留，清理后 clangd 仍可解析
+        echo "已清理（保留了 compile_commands.json）"
         exit 0
         ;;
     reset)
@@ -416,10 +493,9 @@ fi
 UF2="$BUILD_DIR/$PROJECT_NAME.uf2"
 
 mkdir -p "$BUILD_DIR"
-cd "$BUILD_DIR"
-cmake .. > /dev/null
-make -j"$(nproc)"
-cd ..
+cmake -S . -B "$BUILD_DIR" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON > /dev/null
+gen_cdb "$BUILD_DIR"
+make -C "$BUILD_DIR" -j"$(nproc)"
 
 if [ ! -f "$UF2" ]; then
     echo "没找到 $UF2"
