@@ -31,7 +31,7 @@ git submodule update --init
 
 `git submodule update --init` 为必需步骤，TinyUSB 等组件以子模块提供，未初始化时 USB 串口不可用。
 
-也可用 AUR 包（路径为 `/usr/share/pico-sdk`，需相应调整 `PICO_SDK_PATH`）：
+也可用 AUR 包（路径为 `/usr/share/pico-sdk`）：
 
 ```bash
 yay -S pico-sdk
@@ -51,13 +51,11 @@ ls "$PICO_SDK_PATH/pico_sdk_init.cmake"
 
 ### RISC-V 工具链（仅 `--arch riscv`）
 
-SDK 按 `riscv32-pico-elf-gcc`、`riscv32-unknown-elf-gcc`、`riscv32-corev-elf-gcc`、`riscv-none-elf-gcc` 的顺序查找编译器，装任意一套并置于 `PATH` 即可。官方预编译版本见 <https://github.com/raspberrypi/pico-sdk-tools/releases>，使用时需设置：
+SDK 按 `riscv32-pico-elf-gcc`、`riscv32-unknown-elf-gcc`、`riscv32-corev-elf-gcc`、`riscv-none-elf-gcc` 的顺序查找编译器，装任意一套并置于 `PATH` 或者设置`PICO_TOOLCHAIN_PATH`即可。官方预编译版本见 <https://github.com/raspberrypi/pico-sdk-tools/releases>，使用时设置：
 
 ```bash
 export PICO_TOOLCHAIN_PATH=/path/to/riscv-toolchain-16/
 ```
-
-Arch 仓库的 `riscv32-elf-binutils` 前缀不在查找列表内，单独安装无法完成编译。
 
 ## 安装
 
@@ -190,20 +188,3 @@ SDK：/usr/share/pico-sdk（2.3.1）
 | `PICO_SDK_PATH` | `~/pico/pico-sdk` |
 | `XDG_CONFIG_HOME` | `~/.config` |
 
-**RISC-V 需注意工具链的架构属性。** SDK 为 Hazard3 生成 `-march=rv32ima_zicsr_zifencei_zba_zbb_zbs_zbkb_zca_zcb_zcmp -mabi=ilp32`；若所用工具链的 `libc.a` 按 `rv32i_m_a_f_d_c` 构建（含 F/D 扩展），链接会报 `failed to merge target specific data`。判断方式：
-
-```bash
-riscv32-unknown-elf-readelf -A <工具链>/lib/libc.a | grep Tag_RISCV_arch
-```
-
-`Tag_RISCV_arch` 中不应出现 `f`、`d`。
-
-## 构建验证
-
-Pico SDK 2.3.1 实测通过：
-
-| 配置 | 产物 |
-|---|---|
-| `--arch arm --lang c --stdio usb --libs i2c,spi --starter blink` | 62 KB，family `0xe48bff59` |
-| `--arch arm --lang cpp --stdio both --starter pio` | 67 KB，`.pio` 自动汇编成功 |
-| `--arch riscv --lang cpp --stdio usb --libs pwm --starter empty` | 配置与编译通过，链接取决于工具链属性 |
