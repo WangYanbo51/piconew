@@ -320,20 +320,22 @@ show_info() {
     uf2="$BUILD_DIR/$name.uf2"
     if [ -f "$uf2" ]; then
         size=$(du -h "$uf2" | cut -f1)
-        # UF2 每个 512 字节块的第 0x1C 字节起是芯片标识，小端存放
-        fam=$(od -An -tx1 -j 28 -N 4 "$uf2" | awk '{printf "0x%s%s%s%s", $4, $3, $2, $1}')
+        # UF2 每个 512 字节块的第 0x1C 字节起是芯片标识，小端存放；
+        # 取 image 模式下 blockNo 为 0 的那一块，而非文件首块（后者可能是 ABS 块）
+        fam=$(uf2_family "$uf2")
         case "$fam" in
-            0xe48bff57) chip="RP2350 ARM-S" ;;
-            0xe48bff59) chip="RP2350 RISC-V" ;;
             0xe48bff56) chip="RP2040" ;;
+            0xe48bff57) chip="绝对地址（ABS 块）" ;;
+            0xe48bff59) chip="RP2350 ARM-S" ;;
+            0xe48bff5a) chip="RP2350 RISC-V" ;;
             *)          chip="未知标识" ;;
         esac
-        echo "产物：$uf2（$size，$chip，$(date -r "$uf2" '+%Y-%m-%d %H:%M')）"
+        echo "产物：$uf2（$size，${chip}，$(date -r "$uf2" '+%Y-%m-%d %H:%M')）"
 
         # 平台与产物芯片标识不符，说明 build/ 里是旧配置编出来的
         case "$derived" in
-            *riscv*) expect="0xe48bff59" ;;
-            rp2350*) expect="0xe48bff57" ;;
+            *riscv*) expect="0xe48bff5a" ;;
+            rp2350*) expect="0xe48bff59" ;;
             rp2040*) expect="0xe48bff56" ;;
             *)       expect="" ;;
         esac
@@ -349,6 +351,32 @@ show_info() {
     else
         echo "串口设备：未检测到（没插板子，或板子在 BOOTSEL 模式）"
     fi
+}
+
+# 读 UF2 的芯片标识，输出形如 0xe48bff59
+# 优先取 blockNo 为 0 且非 ABS 的块；不存在时退回文件首块
+uf2_family() {
+    /usr/bin/env python3 - "$1" 2>/dev/null <<'PYEOF'
+import struct, sys
+d = open(sys.argv[1], 'rb').read()
+counts = {}
+order = []
+for off in range(0, len(d) - 511, 512):
+    b = d[off:off + 512]
+    if b[:4] != b'UF2\n' or struct.unpack('<I', b[4:8])[0] != 0x9e5d5157:
+        continue
+    flags = struct.unpack('<I', b[8:12])[0]
+    fam = struct.unpack('<I', b[28:32])[0]
+    # 0x1 = NOT_MAIN_FLASH，ABS 块的 family 是 ABSOLUTE_FAMILY_ID，与芯片无关
+    if flags & 0x1:
+        continue
+    key = '0x%08x' % fam
+    if key not in counts:
+        counts[key] = 0
+        order.append(key)
+    counts[key] += 1
+print(max(order, key=lambda k: counts[k]) if counts else '0x00000000')
+PYEOF
 }
 
 case "${1:-}" in
